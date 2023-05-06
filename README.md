@@ -1,7 +1,7 @@
 # flail
 
-> 
 > flail
+> 
 > verb: *flail*; 3rd person present: *flails*; past tense: *flailed*; past participle: *flailed*; gerund or present participle: *flailing*
 > 
 > 1. wave or swing or cause to wave or swing wildly.
