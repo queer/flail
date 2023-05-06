@@ -19,7 +19,7 @@ ctor = "0.2.0"
 eyre = "0.6.8"
 getset = "0.1.2"
 lazy_static = "1.4.0"
-libe2fs-sys = { path = "../libe2fs-sys" }
+libe2fs-sys = { version = "0.1.0", path = "../libe2fs-sys" }
 log = "0.4.17"
 pretty_env_logger = "0.4.0"
 rand = "0.8.5"
