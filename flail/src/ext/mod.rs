@@ -71,7 +71,9 @@ impl ExtFilesystem {
         };
 
         if err == 0 {
-            Ok(Self(Arc::new(RwLock::new(fs))))
+            let out = Self(Arc::new(RwLock::new(fs)));
+            out.read_bitmaps()?;
+            Ok(out)
         } else {
             report(err)
         }
@@ -114,6 +116,7 @@ impl ExtFilesystem {
     }
 
     pub fn read_inode(&self, inode: u32) -> Result<ExtInode> {
+        debug!("reading inode {inode}...");
         let mut inode_ptr = MaybeUninit::uninit();
         let err = unsafe {
             libe2fs_sys::ext2fs_read_inode(
@@ -131,6 +134,7 @@ impl ExtFilesystem {
 
     pub fn find_inode<P: Into<PathBuf>>(&self, path: P) -> Result<ExtInode> {
         let path = path.into();
+        debug!("finding inode for {path:?}...");
         let path = CString::new(path.to_str().unwrap())?;
         let mut inode = MaybeUninit::uninit();
         let err = unsafe {
@@ -332,6 +336,54 @@ impl ExtFilesystem {
         };
         if err == 0 {
             Ok(ExtInodeBitmap(unsafe { map.assume_init() }))
+        } else {
+            report(err)
+        }
+    }
+
+    pub fn mkdir<P: Into<PathBuf>, S: Into<String>>(&self, parent: P, name: S) -> Result<()> {
+        let parent = parent.into();
+        let name = name.into();
+        debug!(
+            "mkdir {}/{name}",
+            parent.display().to_string().trim_end_matches('/')
+        );
+        let parent_inode = self.find_inode(&parent)?;
+        let new_inode = self.new_inode(
+            parent_inode.0,
+            0o777,
+            Some(self.create_inode_bitmap(Some(format!("flail inode bitmap: parent={parent:?}")))?),
+        )?;
+        let err = unsafe {
+            libe2fs_sys::ext2fs_mkdir(
+                self.0.read().unwrap().as_mut().unwrap(),
+                parent_inode.0,
+                new_inode.0,
+                CString::new(name)?.as_ptr(),
+            )
+        };
+        if err == 0 {
+            Ok(())
+        } else {
+            report(err)
+        }
+    }
+
+    pub fn read_bitmaps(&self) -> Result<()> {
+        let err =
+            unsafe { libe2fs_sys::ext2fs_read_bitmaps(self.0.read().unwrap().as_mut().unwrap()) };
+        if err == 0 {
+            Ok(())
+        } else {
+            report(err)
+        }
+    }
+
+    pub fn write_bitmaps(&self) -> Result<()> {
+        let err =
+            unsafe { libe2fs_sys::ext2fs_write_bitmaps(self.0.read().unwrap().as_mut().unwrap()) };
+        if err == 0 {
+            Ok(())
         } else {
             report(err)
         }
@@ -2026,6 +2078,24 @@ mod tests {
             debug!("read {read} bytes");
             assert_eq!(data.as_bytes(), out_buffer.as_slice());
         }
+
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_mkdir_works() -> Result<()> {
+        let img = TempImage::new("./fixtures/empty.ext4")?;
+
+        let fs = ExtFilesystem::open(
+            img.path_view(),
+            None,
+            Some(ExtFilesystemOpenFlags::OPEN_64BIT | ExtFilesystemOpenFlags::OPEN_RW),
+        )?;
+
+        fs.mkdir("/", "foo")?;
+
+        let inode = fs.find_inode("/foo")?;
+        assert_eq!(true, inode.0 > 0);
 
         Ok(())
     }
