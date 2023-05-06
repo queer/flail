@@ -1,0 +1,8 @@
+[package]
+name = "libe2fs-sys"
+version = "0.1.0"
+edition = "2021"
+links = "ext2fs"
+
+[build-dependencies]
+bindgen = "0.65.1"

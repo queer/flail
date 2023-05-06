@@ -1,0 +1,5 @@
+[workspace]
+members = [
+  "libe2fs-sys",
+  "flail",
+]
