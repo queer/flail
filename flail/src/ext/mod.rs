@@ -284,9 +284,13 @@ impl ExtFilesystem {
 
     pub fn write_file(&self, file: &ExtFile, buf: &[u8]) -> Result<usize> {
         let mut written = MaybeUninit::uninit();
+        debug!("attempting to write {} bytes to {file:?}", buf.len());
+        let file = file.0 as *mut libe2fs_sys::real_ext2_file;
+        dbg!(unsafe { *file }.blockno);
+        dbg!(unsafe { *file }.physblock);
         let err = unsafe {
             libe2fs_sys::ext2fs_file_write(
-                file.0,
+                file as *mut libe2fs_sys::ext2_file,
                 buf.as_ptr() as *const ::std::ffi::c_void,
                 buf.len() as u32,
                 written.as_mut_ptr(),
@@ -330,10 +334,66 @@ impl ExtFilesystem {
 
             debug!("attaching data block...");
             let data_block = self.new_block(&mut inode)?;
-            // Get the block number for the inode, and mark it as used in the
-            // block bitmap.
-            debug!("attached!");
+            // now that we know what our data block is, we need to add it to
+            // the inode's extents tree.
+            debug!("adding data block to extents tree...");
+            // in the inode's inode.i_block array, we need to add the data
+            // block as a proper extent entry.
+            // this is the 12-byte header{depth=0}, the 12-byte leaf node, and
+            // the 4-byte checksum.
+            let header = libe2fs_sys::ext3_extent_header {
+                eh_magic: 0xF30A,
+                eh_entries: 1,
+                eh_max: 1,
+                eh_depth: 0,
+                eh_generation: u32::MIN,
+            };
+            let leaf_node = libe2fs_sys::ext3_extent {
+                ee_block: data_block as u32,
+                ee_len: 1,
+                ee_start_hi: (data_block >> 32) as u16,
+                ee_start: data_block as u32,
+            };
+            // build it as a byte array for simplicity, then transmute it up
+            // into a [__u32; 15].
+            const I_BLOCK_SIZE: usize = 15 * ::core::mem::size_of::<libe2fs_sys::__u32>();
+            let mut buf: [u8; I_BLOCK_SIZE] = [0; I_BLOCK_SIZE];
+            unsafe {
+                // write header at 0x0
+                ::core::ptr::copy_nonoverlapping(
+                    &header as *const _ as *const u8,
+                    buf.as_mut_ptr(),
+                    12,
+                );
+                // write leaf node at 0xC
+                ::core::ptr::copy_nonoverlapping(
+                    &leaf_node as *const _ as *const u8,
+                    buf.as_mut_ptr().add(12),
+                    12,
+                );
+            }
 
+            let checksum = libe2fs_sys::ext3_extent_tail {
+                et_checksum: unsafe { libe2fs_sys::ext2fs_crc32c_le(0, buf.as_mut_ptr(), 24) },
+            };
+
+            unsafe {
+                // write checksum at 0x18
+                ::core::ptr::copy_nonoverlapping(
+                    &checksum as *const _ as *const u8,
+                    buf.as_mut_ptr().add(24),
+                    4,
+                );
+            }
+
+            // do final transmutation into i_block shape
+            let final_i_block = unsafe {
+                ::core::mem::transmute::<[u8; I_BLOCK_SIZE], [libe2fs_sys::__u32; 15]>(buf)
+            };
+            inode.1.i_block = final_i_block;
+
+            // get the block number for the inode, and mark it as used in the
+            // block bitmap.
             debug!("marking block {} as used...", data_block);
             if !self.test_block_bitmap_range(data_block as u32, 0)? {
                 return Err(eyre!("block {} is already in use!", data_block));
@@ -458,7 +518,8 @@ impl ExtFilesystem {
             // # of bytes that the entire block bitmap takes up
             let block_map_size = ((*fs).blocksize << 3) as usize;
 
-            let mut bgd_block_map: Vec<u8> = vec![0; block_map_size];
+            // let bgd_block_map: &mut [u8] = &mut vec![0; block_map_size];
+            let mut bgd_block_map = MaybeUninit::<[u8; 8192]>::uninit();
             debug!(
                 "reading bgd blockmap with block={bgd_block_map_block} and block_size={block_map_size}",
             );
@@ -472,6 +533,7 @@ impl ExtFilesystem {
                 debug!("failed to read bgd block map!!!");
                 return report(err);
             }
+            let mut bgd_block_map = bgd_block_map.assume_init();
             debug!("read {} bytes of bgd block map!", bgd_block_map.len());
             // update all bits
             let mut updated_block_count = 0;
@@ -1026,6 +1088,7 @@ impl IoStats {
 
 /// Files ***MUST*** be closed by their respective filesystem for writes to
 /// apply!!!
+#[derive(Debug)]
 pub struct ExtFile(libe2fs_sys::ext2_file_t, ExtFileState);
 
 impl Drop for ExtFile {

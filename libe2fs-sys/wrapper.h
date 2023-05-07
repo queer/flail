@@ -81,3 +81,16 @@ struct ext2_bitmap_ops
   errcode_t (*find_first_set)(ext2fs_generic_bitmap_64 bitmap,
                               __u64 start, __u64 end, __u64 *out);
 };
+
+struct real_ext2_file
+{
+  errcode_t magic;
+  ext2_filsys fs;
+  ext2_ino_t ino;
+  struct ext2_inode inode;
+  int flags;
+  __u64 pos;
+  blk64_t blockno;
+  blk64_t physblock;
+  char *buf;
+};
