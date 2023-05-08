@@ -320,20 +320,53 @@ impl ExtFilesystem {
             libe2fs_sys::ext2fs_new_inode(
                 fs,
                 dir,
-                mode as i32,
+                libe2fs_sys::LINUX_S_IFREG as i32,
                 std::ptr::null_mut(),
                 inode.as_mut_ptr(),
             )
         };
         if err == 0 {
             let inum = unsafe { inode.assume_init() };
-            let mut inode = self.read_inode(inum)?;
+            // let mut inode = self.read_inode(inum)?;
             debug!("created inode: {inum}");
             // once we have the inode, set its mode to be a file
-            inode.1.i_mode |= libe2fs_sys::LINUX_S_IFREG as u16;
+            let mut inode = libe2fs_sys::ext2_inode {
+                i_mode: mode | libe2fs_sys::LINUX_S_IFREG as u16,
+                i_uid: 0,
+                i_size: 0,
+                i_atime: 0,
+                i_ctime: 0,
+                i_mtime: 0,
+                i_dtime: 0,
+                i_gid: 0,
+                i_links_count: 0,
+                i_blocks: unsafe { (*fs).blocksize / 512 },
+                i_flags: 0,
+                osd1: libe2fs_sys::ext2_inode__bindgen_ty_1 {
+                    linux1: libe2fs_sys::ext2_inode__bindgen_ty_1__bindgen_ty_1 { l_i_version: 0 },
+                },
+                i_block: [0; 15],
+                i_generation: 0,
+                i_file_acl: 0,
+                i_size_high: 0,
+                i_faddr: 0,
+                osd2: libe2fs_sys::ext2_inode__bindgen_ty_2 {
+                    linux2: libe2fs_sys::ext2_inode__bindgen_ty_2__bindgen_ty_1 {
+                        l_i_blocks_hi: 0,
+                        l_i_file_acl_high: 0,
+                        l_i_uid_high: 0,
+                        l_i_gid_high: 0,
+                        l_i_checksum_lo: 0,
+                        l_i_reserved: 0,
+                    },
+                },
+            };
+
+            debug!("writing new inode...");
+            let err = unsafe { libe2fs_sys::ext2fs_write_new_inode(fs, inum, &mut inode) };
 
             debug!("attaching data block...");
-            let data_block = self.new_block(&mut inode)?;
+            let data_block = self.new_block(&mut ExtInode(inum, inode))?;
             // now that we know what our data block is, we need to add it to
             // the inode's extents tree.
             debug!("adding data block to extents tree...");
@@ -390,20 +423,14 @@ impl ExtFilesystem {
             let final_i_block = unsafe {
                 ::core::mem::transmute::<[u8; I_BLOCK_SIZE], [libe2fs_sys::__u32; 15]>(buf)
             };
-            inode.1.i_block = final_i_block;
+            inode.i_block = final_i_block;
+            debug!("uses {} 512b-i_blocks", inode.i_blocks);
 
             // get the block number for the inode, and mark it as used in the
             // block bitmap.
-            debug!("marking block {} as used...", data_block);
-            if !self.test_block_bitmap_range(data_block as u32, 0)? {
-                return Err(eyre!("block {} is already in use!", data_block));
-            }
-            debug!("writing new inode...");
-            let err = unsafe { libe2fs_sys::ext2fs_write_new_inode(fs, inum, &mut inode.1) };
-            debug!("block test passed, applying!");
-            self.mark_block_bitmap_range(data_block as u32, 0)?;
+            unsafe { libe2fs_sys::ext2fs_block_alloc_stats2(fs, data_block, 1) };
             if err == 0 {
-                Ok(inode)
+                Ok(ExtInode(inum, inode))
             } else {
                 report(err)
             }
@@ -438,181 +465,6 @@ impl ExtFilesystem {
         let block_number =
             unsafe { libe2fs_sys::ext2fs_find_inode_goal(fs, inode.0, std::ptr::null_mut(), 0) };
         Ok(ExtBlock(block_number))
-    }
-
-    pub fn mark_block_bitmap_range(&self, start: u32, len: u32) -> Result<()> {
-        debug!("marking block bitmap range {start}+{len}");
-        unsafe {
-            let fs = *self.0.write().unwrap();
-            let block_map = (*fs).block_map;
-            debug!("setup finished");
-            // to mark a range as used, we
-            // - cast block_map to a ext2fs_generic_bitmap_64
-            // - set bit (block + i - block_map->start) in bitmap->bitmap
-
-            {
-                let block_map =
-                    block_map as *mut _ as *mut libe2fs_sys::ext2fs_struct_generic_bitmap_64;
-
-                if (start as u64) < (*block_map).start {
-                    return Err(eyre!(
-                        "block {start} before block_map.start {}",
-                        (*block_map).start
-                    ));
-                }
-                if (start as u64) > (*block_map).real_end {
-                    return Err(eyre!(
-                        "block {start} after block_map.real_end {}",
-                        (*block_map).real_end
-                    ));
-                }
-                if (start + len) as u64 > (*block_map).real_end {
-                    return Err(eyre!(
-                        "block {start}+{len} after block_map.real_end {}",
-                        (*block_map).real_end
-                    ));
-                }
-                debug!(
-                    "start={start}, len={len}, block_map.start={}, block_map.real_end={}",
-                    (*block_map).start,
-                    (*block_map).real_end
-                );
-            }
-
-            if len > 0 {
-                for i in 0..len {
-                    debug!("setting block in range {}", start + i);
-                    libe2fs_sys::ext2fs_mark_generic_bmap(block_map, (start + i).into());
-                }
-            } else {
-                debug!("setting block {}", start);
-                libe2fs_sys::ext2fs_mark_generic_bmap(block_map, start.into());
-            }
-
-            debug!("marked block bitmap range");
-            debug!("new block map: {block_map:?}");
-            (*fs).block_map = block_map as *mut _;
-            self.write_bitmaps()?;
-
-            let superblock = (*fs).super_;
-            self.reduce_free_block_count_by(fs, len + 1)?;
-
-            // once we mark the bitmap range, we also have to update the bgd
-            // for this block range to have the correct free block count and
-            // the correct block bitmap.
-            // libe2fs lets us pass a null pointer for the gdp, meaning it will
-            // figure out the correct thing to do based on the group number
-            // of type dgrp_t.
-            let group = start / (*superblock).s_blocks_per_group;
-            let bgd = libe2fs_sys::ext2fs_group_desc(fs, std::ptr::null_mut(), group);
-            debug!("got bgd: {bgd:?}");
-            // update the bgd to have the correct free block count.
-            // we lose 2 blocks because the inode needs a block and the data
-            // needs a block.
-            (*bgd).bg_free_blocks_count = (*bgd).bg_free_blocks_count.wrapping_sub(len as u16 + 2);
-            debug!("bg free block count: {}", (*bgd).bg_free_blocks_count);
-            self.flush_fs(fs)?;
-
-            // block number location of the bgd's block bitmap
-            let bgd_block_map_block = (*bgd).bg_block_bitmap;
-            // # of bytes that the entire block bitmap takes up
-            let block_map_size = ((*fs).blocksize << 3) as usize;
-
-            // let bgd_block_map: &mut [u8] = &mut vec![0; block_map_size];
-            let mut bgd_block_map = MaybeUninit::<[u8; 8192]>::uninit();
-            debug!(
-                "reading bgd blockmap with block={bgd_block_map_block} and block_size={block_map_size}",
-            );
-            let err = libe2fs_sys::ext2fs_get_block_bitmap_range2(
-                block_map as *mut _ as *mut libe2fs_sys::ext2fs_struct_generic_bitmap_base,
-                bgd_block_map_block as u64,
-                block_map_size,
-                bgd_block_map.as_mut_ptr() as *mut _,
-            );
-            if err != 0 {
-                debug!("failed to read bgd block map!!!");
-                return report(err);
-            }
-            let mut bgd_block_map = bgd_block_map.assume_init();
-            debug!("read {} bytes of bgd block map!", bgd_block_map.len());
-            // update all bits
-            let mut updated_block_count = 0;
-            for i in 0..=len {
-                debug!("setting block {}", start + i);
-                let byte = (start + i) / 8;
-                let bit = (start + i) % 8;
-                let bits_set = bgd_block_map[byte as usize] != 0;
-                bgd_block_map[byte as usize] |= 1 << bit;
-                if !bits_set {
-                    updated_block_count += 1;
-                }
-            }
-            debug!("updated block count: {}", updated_block_count);
-            self.flush_fs(fs)?;
-
-            // once all bits are updated, write the new block map back to the
-            // filesystem
-            debug!(
-                "block_size={}, bgd_block_map={}",
-                (*fs).blocksize,
-                bgd_block_map.len()
-            );
-
-            // let err = libe2fs_sys::io_channel_write_blk64(
-            //     (*fs).io,
-            //     ((*fs).blocksize << 3) as u64,
-            //     bgd_block_map_block as i32,
-            //     bgd_block_map.as_ptr() as *const _,
-            // );
-
-            for (i, block) in bgd_block_map
-                .chunks_mut((*fs).blocksize as usize)
-                .enumerate()
-            {
-                let block_num = (bgd_block_map_block + i as u32) as u64;
-                debug!(
-                    "writing bgd block map block {block_num} of len {}|{}",
-                    block.len(),
-                    (*fs).blocksize
-                );
-                let err = libe2fs_sys::io_channel_write_blk64(
-                    (*fs).io,
-                    (*fs).blocksize as u64,
-                    block_num as i32,
-                    block.as_mut_ptr() as *mut _,
-                );
-                if err > 0 {
-                    return report(err);
-                }
-            }
-            self.flush_fs(fs)?;
-        };
-        Ok(())
-    }
-
-    fn reduce_free_block_count_by(
-        &self,
-        fs: *mut libe2fs_sys::struct_ext2_filsys,
-        count: u32,
-    ) -> Result<()> {
-        debug!("applying free blocks count to superblock!");
-        unsafe {
-            let superblock = (*fs).super_;
-            (*superblock).s_free_blocks_count =
-                (*superblock).s_free_blocks_count.wrapping_sub(count);
-            *(*fs).super_ = *superblock;
-        }
-        debug!("flushing superblock changes...");
-        self.flush_fs(fs)?;
-
-        Ok(())
-    }
-
-    pub fn test_block_bitmap_range(&self, block: u32, num: i32) -> Result<bool> {
-        let fs = *self.0.read().unwrap();
-        let bitmap = unsafe { (*fs).block_map };
-        let res = unsafe { libe2fs_sys::ext2fs_test_block_bitmap_range(bitmap, block, num) };
-        Ok(res != 0)
     }
 
     pub fn inode_bitmap(&self) -> ExtInodeBitmap {
@@ -693,23 +545,6 @@ impl ExtFilesystem {
         unsafe {
             (*fs).flags |= (libe2fs_sys::EXT2_FLAG_DIRTY | libe2fs_sys::EXT2_FLAG_CHANGED) as i32;
         };
-        let err = unsafe { libe2fs_sys::ext2fs_flush(fs) };
-        if err == 0 {
-            Ok(())
-        } else {
-            report(err)
-        }
-    }
-
-    fn flush_fs(&self, fs: *mut libe2fs_sys::struct_ext2_filsys) -> Result<()> {
-        debug!("manually flushing fs via pointer");
-        unsafe {
-            (*fs).flags |= (libe2fs_sys::EXT2_FLAG_DIRTY
-                | libe2fs_sys::EXT2_FLAG_CHANGED
-                | libe2fs_sys::EXT2_FLAG_BB_DIRTY
-                | libe2fs_sys::EXT2_FLAG_IB_DIRTY
-                | libe2fs_sys::EXT2_FLAG_FORCE) as i32;
-        }
         let err = unsafe { libe2fs_sys::ext2fs_flush(fs) };
         if err == 0 {
             Ok(())
