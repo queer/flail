@@ -5,6 +5,7 @@ use log::*;
 
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -150,8 +151,9 @@ impl ExtFilesystem {
         let mut inode = MaybeUninit::uninit();
         let err = unsafe {
             debug!("naming inode at {path:?}");
+            let fs = self.0.read().unwrap();
             libe2fs_sys::ext2fs_namei(
-                self.0.read().unwrap().as_mut().unwrap(),
+                *fs,
                 libe2fs_sys::EXT2_ROOT_INO,
                 libe2fs_sys::EXT2_ROOT_INO,
                 path.as_ptr(),
@@ -166,26 +168,35 @@ impl ExtFilesystem {
         }
     }
 
-    pub fn lookup<P: Into<PathBuf>>(&self, dir: P, name: &str) -> Result<ExtInode> {
+    pub fn lookup<P: Into<PathBuf> + Clone>(&self, dir: P, name: &str) -> Result<ExtInode> {
+        {
+            let dir = dir.clone();
+            debug!("looking up {name} in {:?}...", dir.into());
+        }
         let dir_inode_number = self.find_inode(dir)?.0;
+        debug!("found dir inode: {dir_inode_number}");
 
+        let name = match name.strip_prefix('/') {
+            Some(name) => name,
+            None => name,
+        };
         let name = CString::new(name)?;
 
-        let inode = std::ptr::null_mut();
+        let mut inode = MaybeUninit::uninit();
         let err = unsafe {
-            let fs = self.0.clone();
-            let fs = fs.read().unwrap();
+            let fs = self.0.read().unwrap();
+            debug!("looking up {name:?} in {dir_inode_number} via ext2fs_lookup...");
             libe2fs_sys::ext2fs_lookup(
                 *fs,
                 dir_inode_number,
                 name.as_ptr(),
-                name.as_bytes().len() as i32,
+                name.as_bytes().len().try_into()?,
                 std::ptr::null_mut(),
-                inode,
+                inode.as_mut_ptr(),
             )
         };
         if err == 0 {
-            self.read_inode(unsafe { *inode })
+            self.read_inode(unsafe { inode.assume_init() })
         } else {
             report(err)
         }
@@ -214,13 +225,15 @@ impl ExtFilesystem {
     pub fn open_file(&self, inode: u32, flags: Option<ExtFileOpenFlags>) -> Result<ExtFile> {
         let mut file = MaybeUninit::uninit();
         let err = unsafe {
-            libe2fs_sys::ext2fs_file_open(
+            libe2fs_sys::ext2fs_file_open2(
                 self.0.read().unwrap().as_mut().unwrap(),
                 inode,
+                std::ptr::null_mut(),
                 flags.unwrap_or(ExtFileOpenFlags::empty()).bits(),
                 file.as_mut_ptr(),
             )
         };
+
         if err == 0 {
             Ok(ExtFile(unsafe { file.assume_init() }, ExtFileState::Open))
         } else {
@@ -286,8 +299,6 @@ impl ExtFilesystem {
         let mut written = MaybeUninit::uninit();
         debug!("attempting to write {} bytes to {file:?}", buf.len());
         let file = file.0 as *mut libe2fs_sys::real_ext2_file;
-        dbg!(unsafe { *file }.blockno);
-        dbg!(unsafe { *file }.physblock);
         let err = unsafe {
             libe2fs_sys::ext2fs_file_write(
                 file as *mut libe2fs_sys::ext2_file,
@@ -296,7 +307,30 @@ impl ExtFilesystem {
                 written.as_mut_ptr(),
             )
         };
+
+        if err != 0 {
+            return report(err);
+        }
+
+        // update the true size of the inode
+        unsafe {
+            let mut inode = self.read_inode((*file).ino)?;
+            inode.1.i_size = buf.len() as u32;
+            let err = libe2fs_sys::ext2fs_write_inode(
+                self.0.read().unwrap().as_mut().unwrap(),
+                (*file).ino,
+                &mut inode.1,
+            );
+
+            if err != 0 {
+                return report(err);
+            }
+        }
+
+        let err = unsafe { libe2fs_sys::ext2fs_file_flush(file as *mut libe2fs_sys::ext2_file) };
         if err == 0 {
+            self.flush()?;
+            debug!("write succeeded");
             Ok(unsafe { written.assume_init() } as usize)
         } else {
             report(err)
@@ -315,16 +349,18 @@ impl ExtFilesystem {
     pub fn new_inode(&self, dir: u32, mode: u16) -> Result<ExtInode> {
         let mut inode = MaybeUninit::uninit();
         let fs = *self.0.read().unwrap();
+
         debug!("creating new inode in dir {dir} with mode {mode}");
         let err = unsafe {
             libe2fs_sys::ext2fs_new_inode(
                 fs,
                 dir,
-                libe2fs_sys::LINUX_S_IFREG as i32,
-                std::ptr::null_mut(),
+                libe2fs_sys::LINUX_S_IFREG as i32 | 0o0600,
+                (*fs).inode_map,
                 inode.as_mut_ptr(),
             )
         };
+
         if err == 0 {
             let inum = unsafe { inode.assume_init() };
             // let mut inode = self.read_inode(inum)?;
@@ -341,7 +377,8 @@ impl ExtFilesystem {
                 i_gid: 0,
                 i_links_count: 0,
                 i_blocks: unsafe { (*fs).blocksize / 512 },
-                i_flags: 0,
+                // set extents flag, since we like modern ext4 features
+                i_flags: libe2fs_sys::EXT4_EXTENTS_FL,
                 osd1: libe2fs_sys::ext2_inode__bindgen_ty_1 {
                     linux1: libe2fs_sys::ext2_inode__bindgen_ty_1__bindgen_ty_1 { l_i_version: 0 },
                 },
@@ -362,74 +399,168 @@ impl ExtFilesystem {
                 },
             };
 
-            debug!("writing new inode...");
-            let err = unsafe { libe2fs_sys::ext2fs_write_new_inode(fs, inum, &mut inode) };
+            unsafe {
+                let err =
+                    libe2fs_sys::ext2fs_iblk_set(fs, &mut inode as *mut libe2fs_sys::ext2_inode, 1);
+                if err != 0 {
+                    return report(err);
+                }
+                debug!("iblk_set");
+            }
 
             debug!("attaching data block...");
+            // find the next free block and set it on the inode. this value
+            // will be written to the blocks bitmap later.
             let data_block = self.new_block(&mut ExtInode(inum, inode))?;
+            debug!("data block: {data_block}");
+            // TODO: support directories later with ext2fs_new_dir_block!
+
             // now that we know what our data block is, we need to add it to
             // the inode's extents tree.
             debug!("adding data block to extents tree...");
-            // in the inode's inode.i_block array, we need to add the data
-            // block as a proper extent entry.
-            // this is the 12-byte header{depth=0}, the 12-byte leaf node, and
-            // the 4-byte checksum.
-            let header = libe2fs_sys::ext3_extent_header {
-                eh_magic: 0xF30A,
-                eh_entries: 1,
-                eh_max: 1,
-                eh_depth: 0,
-                eh_generation: u32::MIN,
-            };
-            let leaf_node = libe2fs_sys::ext3_extent {
-                ee_block: data_block as u32,
-                ee_len: 1,
-                ee_start_hi: (data_block >> 32) as u16,
-                ee_start: data_block as u32,
-            };
-            // build it as a byte array for simplicity, then transmute it up
-            // into a [__u32; 15].
-            const I_BLOCK_SIZE: usize = 15 * ::core::mem::size_of::<libe2fs_sys::__u32>();
-            let mut buf: [u8; I_BLOCK_SIZE] = [0; I_BLOCK_SIZE];
+
+            // // in the inode's inode.i_block array, we need to add the data
+            // // block as a proper extent entry.
+            // // this is the 12-byte header{depth=0}, the 12-byte leaf node, and
+            // // the 4-byte checksum.
+            // let header = libe2fs_sys::ext3_extent_header {
+            //     eh_magic: 0xF30A,
+            //     eh_entries: 1,
+            //     eh_max: 2,
+            //     eh_depth: 0,
+            //     eh_generation: 0,
+            // };
+            // let leaf_node = libe2fs_sys::ext3_extent {
+            //     ee_block: data_block as u32,
+            //     ee_len: 1,
+            //     ee_start_hi: (data_block >> 32) as u16,
+            //     ee_start: data_block as u32,
+            // };
+
+            // // build it as a byte array for simplicity, then transmute it up
+            // // into a [__u32; 15].
+            // const I_BLOCK_SIZE: usize = 15 * ::core::mem::size_of::<libe2fs_sys::__u32>();
+            // let mut i_block_buffer: [u8; I_BLOCK_SIZE] = [0; I_BLOCK_SIZE];
+            // unsafe {
+            //     // write header.eh_magic at 0x0
+            //     ::core::ptr::copy_nonoverlapping(
+            //         header.eh_magic.to_le_bytes().as_mut_ptr(),
+            //         i_block_buffer.as_mut_ptr(),
+            //         2,
+            //     );
+            //     // write header.eh_entries at 0x2
+            //     ::core::ptr::copy_nonoverlapping(
+            //         header.eh_entries.to_le_bytes().as_mut_ptr(),
+            //         i_block_buffer.as_mut_ptr().add(0x2),
+            //         2,
+            //     );
+            //     // write header.eh_max at 0x4
+            //     ::core::ptr::copy_nonoverlapping(
+            //         header.eh_max.to_le_bytes().as_mut_ptr(),
+            //         i_block_buffer.as_mut_ptr().add(0x4),
+            //         2,
+            //     );
+            //     // write header.eh_depth at 0x6
+            //     ::core::ptr::copy_nonoverlapping(
+            //         header.eh_depth.to_le_bytes().as_mut_ptr(),
+            //         i_block_buffer.as_mut_ptr().add(0x6),
+            //         2,
+            //     );
+            //     // write header.eh_generation at 0x8
+            //     ::core::ptr::copy_nonoverlapping(
+            //         header.eh_generation.to_le_bytes().as_mut_ptr(),
+            //         i_block_buffer.as_mut_ptr().add(0x8),
+            //         4,
+            //     );
+
+            //     // write leaf_node.ee_block at 0xC
+            //     ::core::ptr::copy_nonoverlapping(
+            //         leaf_node.ee_block.to_le_bytes().as_mut_ptr(),
+            //         i_block_buffer.as_mut_ptr().add(0xC),
+            //         4,
+            //     );
+            //     // write leaf_node.ee_len at 0x10
+            //     ::core::ptr::copy_nonoverlapping(
+            //         leaf_node.ee_len.to_le_bytes().as_mut_ptr(),
+            //         i_block_buffer.as_mut_ptr().add(0x10),
+            //         2,
+            //     );
+            //     // write leaf_node.ee_start_hi at 0x12
+            //     ::core::ptr::copy_nonoverlapping(
+            //         leaf_node.ee_start_hi.to_le_bytes().as_mut_ptr(),
+            //         i_block_buffer.as_mut_ptr().add(0x12),
+            //         2,
+            //     );
+            //     // write leaf_node.ee_start at 0x14
+            //     ::core::ptr::copy_nonoverlapping(
+            //         leaf_node.ee_start.to_le_bytes().as_mut_ptr(),
+            //         i_block_buffer.as_mut_ptr().add(0x14),
+            //         4,
+            //     );
+            // }
+            // debug!("wrote extent header + entries");
+
+            // {
+            //     // these are the tests that ext2fs_extent_block_csum_set does.
+            //     // we do them here so thaat errors can bubble up fast.
+            //     assert!(header.eh_magic == 0xF30A);
+            //     assert!(header.eh_entries < header.eh_max);
+            //     let safe_eh_max =
+            //         ((i_block_buffer.len() - 0x18) / 12/* sizeof(ext3_extent) */) as u16;
+            //     assert!(header.eh_max <= safe_eh_max);
+            //     assert!(header.eh_max >= safe_eh_max - 2);
+            // }
+
+            // let err = unsafe {
+            //     libe2fs_sys::ext2fs_extent_block_csum_set(
+            //         fs,
+            //         inum,
+            //         i_block_buffer.as_mut_ptr() as *mut _ as *mut libe2fs_sys::ext3_extent_header,
+            //     )
+            // };
+            // debug!("set extent block checksum!");
+            // if err != 0 {
+            //     return report(err);
+            // }
+
+            // debug!("final extent buffer: {:X?}", i_block_buffer);
+
+            // // do final transmutation into i_block shape
+            // let final_i_block = unsafe {
+            //     ::core::mem::transmute::<[u8; I_BLOCK_SIZE], [libe2fs_sys::__u32; 15]>(
+            //         i_block_buffer,
+            //     )
+            // };
+            // inode.i_block = final_i_block;
+
             unsafe {
-                // write header at 0x0
-                ::core::ptr::copy_nonoverlapping(
-                    &header as *const _ as *const u8,
-                    buf.as_mut_ptr(),
-                    12,
-                );
-                // write leaf node at 0xC
-                ::core::ptr::copy_nonoverlapping(
-                    &leaf_node as *const _ as *const u8,
-                    buf.as_mut_ptr().add(12),
-                    12,
-                );
+                let mut handle = MaybeUninit::uninit();
+                let err =
+                    libe2fs_sys::ext2fs_extent_open2(fs, inum, &mut inode, handle.as_mut_ptr());
+                if err != 0 {
+                    return report(err);
+                }
+                let err =
+                    libe2fs_sys::ext2fs_extent_set_bmap(handle.assume_init(), 0, data_block, 0);
+                if err != 0 {
+                    return report(err);
+                }
             }
 
-            let checksum = libe2fs_sys::ext3_extent_tail {
-                et_checksum: unsafe { libe2fs_sys::ext2fs_crc32c_le(0, buf.as_mut_ptr(), 24) },
-            };
-
-            unsafe {
-                // write checksum at 0x18
-                ::core::ptr::copy_nonoverlapping(
-                    &checksum as *const _ as *const u8,
-                    buf.as_mut_ptr().add(24),
-                    4,
-                );
-            }
-
-            // do final transmutation into i_block shape
-            let final_i_block = unsafe {
-                ::core::mem::transmute::<[u8; I_BLOCK_SIZE], [libe2fs_sys::__u32; 15]>(buf)
-            };
-            inode.i_block = final_i_block;
             debug!("uses {} 512b-i_blocks", inode.i_blocks);
 
-            // get the block number for the inode, and mark it as used in the
-            // block bitmap.
-            unsafe { libe2fs_sys::ext2fs_block_alloc_stats2(fs, data_block, 1) };
+            // flush inode to disk!
+            debug!("writing new inode...");
+            // update inode group unused inodes area to remove this inode
+            // fs, inode, inuse, isdir
+            unsafe {
+                libe2fs_sys::ext2fs_inode_alloc_stats2(fs, inum, 1, 0);
+                libe2fs_sys::ext2fs_block_alloc_stats2(fs, data_block, 1);
+            }
+
+            let err = unsafe { libe2fs_sys::ext2fs_write_new_inode(fs, inum, &mut inode) };
             if err == 0 {
+                self.flush()?;
                 Ok(ExtInode(inum, inode))
             } else {
                 report(err)
@@ -465,6 +596,29 @@ impl ExtFilesystem {
         let block_number =
             unsafe { libe2fs_sys::ext2fs_find_inode_goal(fs, inode.0, std::ptr::null_mut(), 0) };
         Ok(ExtBlock(block_number))
+    }
+
+    pub fn next_free_block(&self) -> Result<u64> {
+        let fs = *self.0.read().unwrap();
+        let mut out = MaybeUninit::<u64>::uninit();
+        let res = unsafe {
+            // FIXME: THIS IS REALLY STUPID.
+            // Just search from the first data block to the end of the fs.
+            let fs = *fs;
+            let superblock = *fs.super_;
+            libe2fs_sys::ext2fs_find_first_zero_generic_bmap(
+                fs.block_map,
+                superblock.s_first_data_block as u64,
+                (superblock.s_blocks_count - superblock.s_first_data_block) as u64,
+                out.as_mut_ptr(),
+            )
+        };
+        if res != 0 {
+            return report(res);
+        }
+        let out = unsafe { out.assume_init() };
+        debug!("found next free block: block #{out}");
+        Ok(out)
     }
 
     pub fn inode_bitmap(&self) -> ExtInodeBitmap {
@@ -553,15 +707,116 @@ impl ExtFilesystem {
         }
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn default_io_manager() -> IoManager {
-        unimplemented!("Windows support is not yet implemented")
+    pub fn write_to_file<P: Into<PathBuf>>(&self, path: P, buf: &[u8]) -> Result<usize> {
+        let fs = *self.0.write().unwrap();
+        let path = path.into();
+
+        let inum = unsafe {
+            let mut inum = MaybeUninit::<u32>::uninit();
+            let err = libe2fs_sys::ext2fs_namei(
+                fs,
+                Self::ROOT_INODE,
+                Self::ROOT_INODE,
+                CString::new(path.to_string_lossy().as_bytes())?.as_ptr(),
+                inum.as_mut_ptr(),
+            );
+            if err != 0 {
+                debug!("could not find inum, allocating new inode");
+                self.new_inode(Self::ROOT_INODE, 0)?.0
+            } else {
+                inum.assume_init()
+            }
+        };
+
+        let file = unsafe {
+            let mut file = MaybeUninit::<libe2fs_sys::ext2_file_t>::uninit();
+            let err = libe2fs_sys::ext2fs_file_open2(
+                fs,
+                inum,
+                std::ptr::null_mut(),
+                (ExtFileOpenFlags::CREATE | ExtFileOpenFlags::WRITE).bits(),
+                file.as_mut_ptr(),
+            );
+            if err != 0 {
+                return report(err);
+            }
+            file.assume_init()
+        };
+
+        // write buf to file
+        let mut written = 0;
+        let err = unsafe {
+            libe2fs_sys::ext2fs_file_write(
+                file,
+                buf.as_ptr() as *const libc::c_void,
+                buf.len() as u32,
+                &mut written,
+            )
+        };
+        if err != 0 {
+            return report(err);
+        }
+
+        unsafe {
+            let fs = *self.0.write().unwrap();
+            let mut inode = self.get_inode(&ExtFile(file, ExtFileState::Open))?;
+            libe2fs_sys::ext2fs_file_close(file as *mut libe2fs_sys::ext2_file);
+            debug!("closed file");
+            debug!("inode size: {}", inode.1.i_size);
+
+            inode.1.i_links_count = 1;
+
+            // write this inode
+            let err = libe2fs_sys::ext2fs_write_inode(fs, inum, &mut inode.1);
+            if err != 0 {
+                return report(err);
+            }
+            debug!("wrote inode");
+
+            // link the inode into the fs hierarchy!
+            let parent_inum = self.find_inode(path.parent().unwrap())?.0;
+            let file_name = path.file_name().unwrap();
+            debug!("linking {file_name:?} @ {inum} to parent inode {parent_inum}");
+            let file_name = CString::new(file_name.as_bytes())?;
+            let err = libe2fs_sys::ext2fs_link(
+                fs,
+                parent_inum,
+                file_name.as_ptr(),
+                inum,
+                libe2fs_sys::EXT2_FT_REG_FILE.try_into()?,
+            );
+            if err != 0 {
+                return report(err);
+            }
+
+            // update parent inode's counts
+            // let mut parent_inode = self.read_inode(parent_inum)?;
+            // debug!("found parent inode: {}", parent_inode.0);
+            // debug!("parent has links: {}", parent_inode.1.i_links_count);
+            // // TODO: FIXME: this doesn't work because ext2fs_link isn't doing the do right...
+            // parent_inode.1.i_links_count += 1;
+            // let err = libe2fs_sys::ext2fs_write_inode(fs, parent_inum, &mut parent_inode.1);
+            // if err != 0 {
+            //     return report(err);
+            // }
+            // debug!("wrote parent inode");
+            // debug!("parent has links: {}", parent_inode.1.i_links_count);
+        }
+
+        self.flush()?;
+
+        Ok(written as usize)
     }
 
-    #[cfg(not(target_os = "windows"))]
-    pub fn default_io_manager() -> IoManager {
-        DEFAULT_IO_MANAGER.clone()
-    }
+    // #[cfg(target_os = "windows")]
+    // pub fn default_io_manager() -> IoManager {
+    //     unimplemented!("Windows support is not yet implemented")
+    // }
+
+    // #[cfg(not(target_os = "windows"))]
+    // pub fn default_io_manager() -> IoManager {
+    //     DEFAULT_IO_MANAGER.clone()
+    // }
 }
 
 impl Drop for ExtFilesystem {
@@ -929,12 +1184,14 @@ pub struct ExtFile(libe2fs_sys::ext2_file_t, ExtFileState);
 impl Drop for ExtFile {
     fn drop(&mut self) {
         if self.1 == ExtFileState::Open {
+            debug!("file open, closing on drop!");
             let file = self.0 as *mut libe2fs_sys::ext2_file_64;
             let res =
                 unsafe { libe2fs_sys::ext2fs_file_close(file as *mut libe2fs_sys::ext2_file) };
             if res != 0 {
-                Err::<(), ExtError>((res as u32).into()).unwrap();
+                panic!("{:#?}", Err::<(), ExtError>((res as u32).into()));
             }
+            debug!("dropped!");
         }
     }
 }
@@ -2240,7 +2497,11 @@ mod tests {
 
     #[test]
     pub fn test_reading_directories_works() -> Result<()> {
-        let fs = ExtFilesystem::open("./fixtures/hello-world.ext4", None, None)?;
+        let fs = ExtFilesystem::open(
+            "./fixtures/hello-world.ext4",
+            None,
+            Some(ExtFilesystemOpenFlags::OPEN_64BIT | ExtFilesystemOpenFlags::OPEN_RW),
+        )?;
 
         fs.iterate_dir(
             "/",
@@ -2346,20 +2607,41 @@ mod tests {
                     Some(ExtFilesystemOpenFlags::OPEN_64BIT | ExtFilesystemOpenFlags::OPEN_RW),
                 )?;
 
-                let inode = fs.new_inode(
-                    ExtFilesystem::ROOT_INODE,
-                    (libe2fs_sys::LINUX_S_IFREG as u16) | 0o700,
-                )?;
                 let data = "hello flail";
 
-                let file = fs.open_file(
-                    inode.num(),
-                    Some(ExtFileOpenFlags::CREATE | ExtFileOpenFlags::WRITE),
-                )?;
                 debug!("write data: '{data}'");
-                let written = fs.write_file(&file, data.as_bytes())?;
+                let written = fs.write_to_file("/test.txt", data.as_bytes())?;
+
                 assert_eq!(data.len(), written);
                 debug!("wrote {written} bytes");
+            }
+
+            let fsck = std::process::Command::new("fsck.ext4")
+                .arg("-f")
+                .arg("-n")
+                .arg(img.path_view())
+                .spawn()?
+                .wait()?;
+
+            assert!(fsck.success());
+
+            {
+                // read /test.txt
+                let fs = ExtFilesystem::open(
+                    img.path_view(),
+                    None,
+                    Some(ExtFilesystemOpenFlags::OPEN_64BIT | ExtFilesystemOpenFlags::OPEN_RW),
+                )?;
+
+                let mut out_buffer = vec![0u8; 11];
+
+                let inode = fs.lookup("/", "/test.txt")?;
+                let file = fs.open_file(inode.0, None)?;
+                let read = fs.read_file(&file, &mut out_buffer)?;
+
+                assert_eq!(11, read);
+                debug!("read {read} bytes");
+                assert_eq!("hello flail", std::str::from_utf8(&out_buffer)?);
             }
 
             let fsck = std::process::Command::new("fsck.ext4")
