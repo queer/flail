@@ -8,6 +8,7 @@ use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 use self::block::*;
 use self::file::*;
@@ -16,12 +17,19 @@ use self::io::*;
 use self::messages::*;
 
 pub mod block;
+pub mod facade;
 pub mod file;
 pub mod inode;
 pub mod io;
 pub mod messages;
 
+#[derive(Debug, Clone)]
 pub struct ExtFilesystem(Arc<RwLock<libe2fs_sys::ext2_filsys>>, PathBuf);
+// SAFETY: I promise I'm doing my best here :sob:
+// All accesses to the ext2_filsys pointer are through an RwLock, and then
+// libe2fs does its own locking internally if it's compiled w/ support.
+unsafe impl Send for ExtFilesystem {}
+unsafe impl Sync for ExtFilesystem {}
 
 lazy_static! {
     static ref DEFAULT_IO_MANAGER: IoManager = {
@@ -58,11 +66,7 @@ impl ExtFilesystem {
          *				filesystems)
          */
 
-        // errcode_t ext2fs_open(const char *name, int flags, int superblock,
-        //       unsigned int block_size, io_manager manager,
-        //       ext2_filsys *ret_fs)
-        //
-        let mut fs: libe2fs_sys::ext2_filsys = std::ptr::null_mut();
+        let mut fs = MaybeUninit::uninit();
         let name = name.into().canonicalize()?;
         let (err, fs) = unsafe {
             debug!("preparing to open ext filesystem...");
@@ -78,13 +82,13 @@ impl ExtFilesystem {
                 0,
                 block_size.unwrap_or(0),
                 &mut *io_manager,
-                &mut fs,
+                fs.as_mut_ptr(),
             );
-            debug!("opened fs with err {err}");
             (err, fs)
         };
 
         if err == 0 {
+            let fs = unsafe { fs.assume_init() };
             let out = Self(Arc::new(RwLock::new(fs)), name);
             debug!("@ starting setup @");
             out.read_bitmaps()?;
@@ -105,7 +109,7 @@ impl ExtFilesystem {
 
     pub fn iterate_dir<F, P: Into<PathBuf>>(&self, dir: P, mut f: F) -> Result<()>
     where
-        F: Fn(&libe2fs_sys::ext2_dir_entry, i32, i32, &str, &[i8]) -> Result<i32>,
+        F: FnMut(*mut libe2fs_sys::ext2_dir_entry, i32, i32, &str, &[i8]) -> Result<i32>,
     {
         let dir = dir.into();
         debug!("iterate dir at {dir:?}");
@@ -431,120 +435,6 @@ impl ExtFilesystem {
             // the inode's extents tree.
             debug!("adding data block to extents tree...");
 
-            // // in the inode's inode.i_block array, we need to add the data
-            // // block as a proper extent entry.
-            // // this is the 12-byte header{depth=0}, the 12-byte leaf node, and
-            // // the 4-byte checksum.
-            // let header = libe2fs_sys::ext3_extent_header {
-            //     eh_magic: 0xF30A,
-            //     eh_entries: 1,
-            //     eh_max: 2,
-            //     eh_depth: 0,
-            //     eh_generation: 0,
-            // };
-            // let leaf_node = libe2fs_sys::ext3_extent {
-            //     ee_block: data_block as u32,
-            //     ee_len: 1,
-            //     ee_start_hi: (data_block >> 32) as u16,
-            //     ee_start: data_block as u32,
-            // };
-
-            // // build it as a byte array for simplicity, then transmute it up
-            // // into a [__u32; 15].
-            // const I_BLOCK_SIZE: usize = 15 * ::core::mem::size_of::<libe2fs_sys::__u32>();
-            // let mut i_block_buffer: [u8; I_BLOCK_SIZE] = [0; I_BLOCK_SIZE];
-            // unsafe {
-            //     // write header.eh_magic at 0x0
-            //     ::core::ptr::copy_nonoverlapping(
-            //         header.eh_magic.to_le_bytes().as_mut_ptr(),
-            //         i_block_buffer.as_mut_ptr(),
-            //         2,
-            //     );
-            //     // write header.eh_entries at 0x2
-            //     ::core::ptr::copy_nonoverlapping(
-            //         header.eh_entries.to_le_bytes().as_mut_ptr(),
-            //         i_block_buffer.as_mut_ptr().add(0x2),
-            //         2,
-            //     );
-            //     // write header.eh_max at 0x4
-            //     ::core::ptr::copy_nonoverlapping(
-            //         header.eh_max.to_le_bytes().as_mut_ptr(),
-            //         i_block_buffer.as_mut_ptr().add(0x4),
-            //         2,
-            //     );
-            //     // write header.eh_depth at 0x6
-            //     ::core::ptr::copy_nonoverlapping(
-            //         header.eh_depth.to_le_bytes().as_mut_ptr(),
-            //         i_block_buffer.as_mut_ptr().add(0x6),
-            //         2,
-            //     );
-            //     // write header.eh_generation at 0x8
-            //     ::core::ptr::copy_nonoverlapping(
-            //         header.eh_generation.to_le_bytes().as_mut_ptr(),
-            //         i_block_buffer.as_mut_ptr().add(0x8),
-            //         4,
-            //     );
-
-            //     // write leaf_node.ee_block at 0xC
-            //     ::core::ptr::copy_nonoverlapping(
-            //         leaf_node.ee_block.to_le_bytes().as_mut_ptr(),
-            //         i_block_buffer.as_mut_ptr().add(0xC),
-            //         4,
-            //     );
-            //     // write leaf_node.ee_len at 0x10
-            //     ::core::ptr::copy_nonoverlapping(
-            //         leaf_node.ee_len.to_le_bytes().as_mut_ptr(),
-            //         i_block_buffer.as_mut_ptr().add(0x10),
-            //         2,
-            //     );
-            //     // write leaf_node.ee_start_hi at 0x12
-            //     ::core::ptr::copy_nonoverlapping(
-            //         leaf_node.ee_start_hi.to_le_bytes().as_mut_ptr(),
-            //         i_block_buffer.as_mut_ptr().add(0x12),
-            //         2,
-            //     );
-            //     // write leaf_node.ee_start at 0x14
-            //     ::core::ptr::copy_nonoverlapping(
-            //         leaf_node.ee_start.to_le_bytes().as_mut_ptr(),
-            //         i_block_buffer.as_mut_ptr().add(0x14),
-            //         4,
-            //     );
-            // }
-            // debug!("wrote extent header + entries");
-
-            // {
-            //     // these are the tests that ext2fs_extent_block_csum_set does.
-            //     // we do them here so thaat errors can bubble up fast.
-            //     assert!(header.eh_magic == 0xF30A);
-            //     assert!(header.eh_entries < header.eh_max);
-            //     let safe_eh_max =
-            //         ((i_block_buffer.len() - 0x18) / 12/* sizeof(ext3_extent) */) as u16;
-            //     assert!(header.eh_max <= safe_eh_max);
-            //     assert!(header.eh_max >= safe_eh_max - 2);
-            // }
-
-            // let err = unsafe {
-            //     libe2fs_sys::ext2fs_extent_block_csum_set(
-            //         fs,
-            //         inum,
-            //         i_block_buffer.as_mut_ptr() as *mut _ as *mut libe2fs_sys::ext3_extent_header,
-            //     )
-            // };
-            // debug!("set extent block checksum!");
-            // if err != 0 {
-            //     return report(err);
-            // }
-
-            // debug!("final extent buffer: {:X?}", i_block_buffer);
-
-            // // do final transmutation into i_block shape
-            // let final_i_block = unsafe {
-            //     ::core::mem::transmute::<[u8; I_BLOCK_SIZE], [libe2fs_sys::__u32; 15]>(
-            //         i_block_buffer,
-            //     )
-            // };
-            // inode.i_block = final_i_block;
-
             unsafe {
                 let mut handle = MaybeUninit::uninit();
                 let err =
@@ -820,6 +710,154 @@ impl ExtFilesystem {
         Ok(written as usize)
     }
 
+    pub fn unlink<P: Into<PathBuf>>(&self, path: P) -> Result<()> {
+        let fs = *self.0.write().unwrap();
+        let path = path.into();
+        let file_name = path
+            .file_name()
+            .expect("cannot unlink files without a name");
+
+        let inode = self.find_inode(&path)?;
+        let parent_inum = self
+            .find_inode(path.parent().unwrap_or(PathBuf::from("/").as_path()))?
+            .0;
+
+        debug!("unlinking {file_name:?}...");
+        let err = unsafe {
+            libe2fs_sys::ext2fs_unlink(
+                fs,
+                parent_inum,
+                CString::from_vec_unchecked(file_name.as_bytes().to_vec()).as_ptr(),
+                inode.0,
+                0,
+            )
+        };
+
+        if err != 0 {
+            return report(err);
+        }
+
+        Ok(())
+    }
+
+    pub fn link<P: Into<PathBuf>>(&self, path: P, new_path: P) -> Result<()> {
+        let fs = *self.0.write().unwrap();
+        let path = path.into();
+        let new_path = new_path.into();
+        let file_name = path
+            .file_name()
+            .expect("cannot unlink files without a name");
+
+        let mut inode = self.find_inode(&path)?;
+        let new_parent_inum = self
+            .find_inode(new_path.parent().unwrap_or(PathBuf::from("/").as_path()))?
+            .0;
+
+        debug!("linking {file_name:?}...");
+        let err = unsafe {
+            libe2fs_sys::ext2fs_link(
+                fs,
+                new_parent_inum,
+                CString::from_vec_unchecked(file_name.as_bytes().to_vec()).as_ptr(),
+                inode.0,
+                libe2fs_sys::EXT2_FT_REG_FILE.try_into()?,
+            )
+        };
+
+        if err != 0 {
+            return report(err);
+        }
+
+        inode.1.i_links_count += 1;
+        let err = unsafe { libe2fs_sys::ext2fs_write_inode(fs, inode.0, &mut inode.1) };
+        if err != 0 {
+            return report(err);
+        }
+
+        Ok(())
+    }
+
+    pub fn delete<P: Into<PathBuf>>(&self, path: P) -> Result<()> {
+        let fs = *self.0.write().unwrap();
+        let path = path.into();
+        let file_name = path
+            .file_name()
+            .expect("cannot unlink files without a name");
+
+        let mut inode = self.find_inode(&path)?;
+        // TODO: Is this actually the right behaviour?
+        let parent_inum = self
+            .find_inode(path.parent().unwrap_or(PathBuf::from("/").as_path()))?
+            .0;
+
+        debug!("unlinking {file_name:?}...");
+        let err = unsafe {
+            libe2fs_sys::ext2fs_unlink(
+                fs,
+                parent_inum,
+                CString::from_vec_unchecked(file_name.as_bytes().to_vec()).as_ptr(),
+                inode.0,
+                0,
+            )
+        };
+        if err != 0 {
+            return report(err);
+        }
+
+        inode.1.i_links_count -= 1;
+        inode.1.i_dtime = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+
+        let err = unsafe { libe2fs_sys::ext2fs_write_inode(fs, inode.0, &mut inode.1) };
+        if err != 0 {
+            return report(err);
+        }
+
+        // obliterate any remaining blocks
+        if unsafe { libe2fs_sys::ext2fs_inode_has_valid_blocks2(fs, &mut inode.1 as *mut _) != 0 } {
+            let err = unsafe {
+                libe2fs_sys::ext2fs_punch(
+                    fs,
+                    inode.0,
+                    &mut inode.1 as *mut _,
+                    std::ptr::null_mut(),
+                    0,
+                    u64::MAX,
+                )
+            };
+            if err != 0 {
+                return report(err);
+            }
+        }
+
+        unsafe {
+            // fs, ino, in_use, is_dir
+            libe2fs_sys::ext2fs_inode_alloc_stats2(fs, inode.0, -1, 0);
+        }
+
+        self.flush()?;
+
+        Ok(())
+    }
+
+    pub fn write_inode(&self, inode: &mut ExtInode) -> Result<()> {
+        let err = unsafe {
+            libe2fs_sys::ext2fs_write_inode(
+                self.0.read().unwrap().as_mut().unwrap(),
+                inode.0,
+                &mut inode.1,
+            )
+        };
+
+        if err != 0 {
+            report(err)
+        } else {
+            Ok(())
+        }
+    }
+
     // #[cfg(target_os = "windows")]
     // pub fn default_io_manager() -> IoManager {
     //     unimplemented!("Windows support is not yet implemented")
@@ -877,10 +915,11 @@ unsafe extern "C" fn dir_iterator_trampoline<F>(
     user_data: *mut ::std::ffi::c_void,
 ) -> i32
 where
-    F: Fn(&libe2fs_sys::ext2_dir_entry, i32, i32, &str, &[i8]) -> Result<i32>,
+    F: FnMut(*mut libe2fs_sys::ext2_dir_entry, i32, i32, &str, &[i8]) -> Result<i32>,
 {
-    let dir_entry: &libe2fs_sys::ext2_dir_entry = &*dir_entry;
-    let name = CStr::from_ptr(dir_entry.name.as_ptr()).to_str().unwrap();
+    let name = CStr::from_ptr(unsafe { *dir_entry }.name.as_ptr())
+        .to_str()
+        .unwrap();
     debug!("got dir entry: {name}");
     let buf = std::slice::from_raw_parts(buf, block_size as usize);
     debug!("built buf!");
@@ -891,7 +930,7 @@ where
 
 fn get_dir_iterator_trampoline<F>(_closure: &F) -> DirIteratorCallback
 where
-    F: Fn(&libe2fs_sys::ext2_dir_entry, i32, i32, &str, &[i8]) -> Result<i32>,
+    F: FnMut(*mut libe2fs_sys::ext2_dir_entry, i32, i32, &str, &[i8]) -> Result<i32>,
 {
     dir_iterator_trampoline::<F>
 }
@@ -990,9 +1029,13 @@ mod tests {
 
         fs.iterate_dir(
             "/",
-            |dir_entry: &libe2fs_sys::ext2_dir_entry, _offset, _block_size, name, _priv_data| {
-                assert_ne!(dir_entry.inode, 0);
-                debug!("reading inode {}", dir_entry.inode);
+            |dir_entry: *mut libe2fs_sys::ext2_dir_entry,
+             _offset,
+             _block_size,
+             name: &str,
+             _priv_data| {
+                assert_ne!((unsafe { *dir_entry }).inode, 0);
+                debug!("reading inode {}", unsafe { *dir_entry }.inode);
                 debug!("got path: {name}!!!");
                 assert_ne!(name.len(), 0);
                 Ok(0)
@@ -1086,6 +1129,7 @@ mod tests {
             let img = TempImage::new("./fixtures/empty.ext4")?;
 
             {
+                // write /test.txt
                 let fs = ExtFilesystem::open(
                     img.path_view(),
                     None,
@@ -1127,6 +1171,26 @@ mod tests {
                 assert_eq!(11, read);
                 debug!("read {read} bytes");
                 assert_eq!("hello flail", std::str::from_utf8(&out_buffer)?);
+            }
+
+            let fsck = std::process::Command::new("fsck.ext4")
+                .arg("-f")
+                .arg("-n")
+                .arg(img.path_view())
+                .spawn()?
+                .wait()?;
+
+            assert!(fsck.success());
+
+            {
+                // unlink /test.txt
+                let fs = ExtFilesystem::open(
+                    img.path_view(),
+                    None,
+                    Some(ExtFilesystemOpenFlags::OPEN_64BIT | ExtFilesystemOpenFlags::OPEN_RW),
+                )?;
+
+                fs.delete("/test.txt")?;
             }
 
             let fsck = std::process::Command::new("fsck.ext4")
