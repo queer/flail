@@ -1,4 +1,4 @@
 {
-  "rust-analyzer.linkedProjects": ["./flail/Cargo.toml", "./libe2fse-sys/Cargo.toml"],
+  "rust-analyzer.linkedProjects": ["./flail/Cargo.toml", "./libe2fs-sys/Cargo.toml"],
   "rust-analyzer.showUnlinkedFileNotification": false
 }
