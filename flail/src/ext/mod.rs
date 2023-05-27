@@ -6,7 +6,7 @@ use log::*;
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
@@ -169,6 +169,30 @@ impl ExtFilesystem {
             debug!("naming inode at {path:?}");
             let fs = self.0.read().unwrap();
             libe2fs_sys::ext2fs_namei(
+                *fs,
+                libe2fs_sys::EXT2_ROOT_INO,
+                libe2fs_sys::EXT2_ROOT_INO,
+                path.as_ptr(),
+                inode.as_mut_ptr(),
+            )
+        };
+        if err == 0 {
+            debug!("found inode, reading...");
+            self.read_inode(unsafe { *inode.assume_init_mut() })
+        } else {
+            report(err)
+        }
+    }
+
+    pub fn find_inode_follow<P: Into<PathBuf>>(&self, path: P) -> Result<ExtInode> {
+        let path = path.into();
+        debug!("finding inode for {path:?}...");
+        let path = CString::new(path.to_str().unwrap())?;
+        let mut inode = MaybeUninit::uninit();
+        let err = unsafe {
+            debug!("naming inode at {path:?}");
+            let fs = self.0.read().unwrap();
+            libe2fs_sys::ext2fs_namei_follow(
                 *fs,
                 libe2fs_sys::EXT2_ROOT_INO,
                 libe2fs_sys::EXT2_ROOT_INO,
@@ -856,6 +880,39 @@ impl ExtFilesystem {
         } else {
             Ok(())
         }
+    }
+
+    pub fn symlink<P1: AsRef<Path>, P2: AsRef<Path>>(
+        &self,
+        symlink_parent_dir: &ExtInode,
+        symlink_inode: Option<&ExtInode>,
+        symlink_name: P1,
+        symlink_target_path: P2,
+    ) -> Result<()> {
+        let symlink_name = symlink_name.as_ref();
+        let symlink_target_path = symlink_target_path.as_ref();
+
+        let symlink_target_path = CString::new(
+            symlink_target_path
+                .as_os_str()
+                .to_string_lossy()
+                .to_string(),
+        )
+        .unwrap();
+        let symlink_name =
+            CString::new(symlink_name.as_os_str().to_string_lossy().to_string()).unwrap();
+
+        unsafe {
+            libe2fs_sys::ext2fs_symlink(
+                self.0.read().unwrap().as_mut().unwrap(),
+                symlink_parent_dir.0,
+                symlink_inode.map(|i| i.0).unwrap_or(0),
+                symlink_name.as_ptr(),
+                symlink_target_path.as_ptr(),
+            );
+        };
+
+        Ok(())
     }
 
     // #[cfg(target_os = "windows")]

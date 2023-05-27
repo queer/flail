@@ -1,4 +1,5 @@
 use std::ffi::{CString, OsString};
+use std::future::Future;
 use std::io::Result;
 use std::os::unix::prelude::OsStringExt;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use floppy_disk::prelude::*;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use tokio::sync::RwLock;
 
+use super::file::ExtFile;
 use super::inode::ExtInode;
 
 #[derive(Debug, Clone)]
@@ -37,16 +39,36 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
     type Metadata = ExtFacadeMetadata;
     type ReadDir = ExtFacadeReadDir;
     type Permissions = ExtFacadePermissions;
-    type DirBuilder = ExtFacadeDirBuilder;
+    type DirBuilder = ExtFacadeDirBuilder<'a>;
 
-    async fn canonicalize<P: AsRef<Path> + Send>(&self, path: P) -> Result<PathBuf> {
+    async fn canonicalize<P: AsRef<Path> + Send>(&self, _path: P) -> Result<PathBuf> {
         unimplemented!(
             "canonicalize does not have any meaning as everything is already relative to root"
         )
     }
 
     async fn copy<P: AsRef<Path> + Send>(&self, from: P, to: P) -> Result<u64> {
-        todo!()
+        let from = from.as_ref();
+        let to = to.as_ref();
+        let (data, permissions) = {
+            let fs = self.fs.read().await;
+            let inode = fs.find_inode(from).map_err(wrap_report)?;
+            let file = fs.open_file(inode.0, None).map_err(wrap_report)?;
+            let mut buf = vec![0; inode.size() as usize];
+            fs.read_file(&file, &mut buf).map_err(wrap_report)?;
+
+            (buf, inode.mode() & 0o777)
+        };
+
+        self.write(to, &data).await?;
+        {
+            let fs = self.fs.write().await;
+            let mut inode = fs.find_inode(to).map_err(wrap_report)?;
+            inode.1.i_mode = (inode.1.i_mode & 0o70000) | permissions;
+            fs.write_inode(&mut inode).map_err(wrap_report)?;
+        }
+
+        Ok(data.len() as u64)
     }
 
     async fn create_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
@@ -107,13 +129,13 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
         Ok(())
     }
 
-    async fn hard_link<P: AsRef<Path> + Send>(&self, src: P, dst: P) -> Result<()> {
+    async fn hard_link<P: AsRef<Path> + Send>(&self, _src: P, _dst: P) -> Result<()> {
         unimplemented!("please open an issue if you need hard-link functionality.")
     }
 
     async fn metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata> {
         let fs = self.fs.read().await;
-        match fs.find_inode(path.as_ref()) {
+        match fs.find_inode_follow(path.as_ref()) {
             Ok(inode) => Ok(ExtFacadeMetadata {
                 inode: DebugIgnore(inode),
             }),
@@ -209,7 +231,19 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
     }
 
     async fn remove_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
-        todo!()
+        let path = path.as_ref();
+        let mut read_dir = self.read_dir(path).await?;
+        while let Some(entry) = read_dir.next_entry().await? {
+            let inode = entry.inode;
+            let path = entry.path();
+            if inode.is_dir() {
+                self.remove_dir_all(path).await?;
+            } else {
+                self.remove_file(path).await?;
+            }
+        }
+
+        self.remove_dir(path).await
     }
 
     async fn remove_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
@@ -245,11 +279,25 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
     }
 
     async fn symlink<P: AsRef<Path> + Send>(&self, src: P, dst: P) -> Result<()> {
-        todo!()
+        let fs = self.fs.write().await;
+        let src = src.as_ref();
+        let dst = dst.as_ref();
+        let parent_inode = fs
+            .find_inode(src.parent().unwrap_or(Path::new("/")))
+            .map_err(wrap_report)?;
+
+        fs.symlink(&parent_inode, None, src, dst)
+            .map_err(wrap_report)
     }
 
     async fn symlink_metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata> {
-        todo!()
+        let fs = self.fs.read().await;
+        match fs.find_inode(path.as_ref()) {
+            Ok(inode) => Ok(ExtFacadeMetadata {
+                inode: DebugIgnore(inode),
+            }),
+            Err(err) => Err(wrap_report(err)),
+        }
     }
 
     async fn try_exists<P: AsRef<Path> + Send>(&self, path: P) -> Result<bool> {
@@ -264,11 +312,18 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
         path: P,
         contents: impl AsRef<[u8]> + Send,
     ) -> Result<()> {
-        todo!()
+        let fs = self.fs.write().await;
+        fs.write_to_file(path.as_ref(), contents.as_ref())
+            .map(|_| ())
+            .map_err(wrap_report)
     }
 
     fn new_dir_builder(&'a self) -> Self::DirBuilder {
-        todo!()
+        ExtFacadeDirBuilder {
+            facade: self,
+            recursive: false,
+            mode: None,
+        }
     }
 }
 
@@ -375,22 +430,44 @@ impl FloppyPermissions for ExtFacadePermissions {
     }
 }
 
-#[repr(transparent)]
 #[derive(Debug)]
-pub struct ExtFacadeDirBuilder();
+pub struct ExtFacadeDirBuilder<'a> {
+    facade: &'a ExtFacadeFloppyDisk,
+    recursive: bool,
+    mode: Option<u32>,
+}
 
 #[async_trait::async_trait]
-impl FloppyDirBuilder for ExtFacadeDirBuilder {
+impl FloppyDirBuilder for ExtFacadeDirBuilder<'_> {
     fn recursive(&mut self, recursive: bool) -> &mut Self {
-        todo!()
+        self.recursive = recursive;
+        self
     }
 
     async fn create<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
-        todo!()
+        let fs = self.facade.fs.read().await;
+        let path = path.as_ref();
+        fs.mkdir(
+            path.parent().unwrap_or(&PathBuf::from("/")),
+            path.file_name()
+                .expect("paths must have file names")
+                .to_string_lossy()
+                .to_string(),
+        )
+        .map_err(wrap_report)?;
+
+        if let Some(mode) = self.mode {
+            let mut inode = fs.find_inode(path).unwrap();
+            inode.1.i_mode |= mode as u16;
+            fs.write_inode(&mut inode).map_err(wrap_report)?;
+        }
+
+        Ok(())
     }
 
     fn mode(&mut self, mode: u32) -> &mut Self {
-        todo!()
+        self.mode = if mode == 0 { None } else { Some(mode) };
+        self
     }
 }
 
@@ -456,117 +533,183 @@ impl FloppyFileType for ExtFacadeFileType {
 }
 
 #[derive(Debug)]
-pub struct ExtFacadeOpenOptions();
+pub struct ExtFacadeOpenOptions<'a> {
+    _facade: &'a ExtFacadeFloppyDisk,
+    read: bool,
+    write: bool,
+    append: bool,
+    truncate: bool,
+    create: bool,
+    create_new: bool,
+}
 
 #[async_trait::async_trait]
-impl FloppyOpenOptions for ExtFacadeOpenOptions {
-    type File = ExtFacadeFile;
+impl<'a> FloppyOpenOptions for ExtFacadeOpenOptions<'a> {
+    type File = ExtFacadeFile<'a>;
 
     fn new() -> Self {
-        Self()
+        unimplemented!()
     }
 
     fn read(&mut self, read: bool) -> &mut Self {
-        todo!()
+        self.read = read;
+        self
     }
 
     fn write(&mut self, write: bool) -> &mut Self {
-        todo!()
+        self.write = write;
+        self
     }
 
     fn append(&mut self, append: bool) -> &mut Self {
-        todo!()
+        self.append = append;
+        self
     }
 
     fn truncate(&mut self, truncate: bool) -> &mut Self {
-        todo!()
+        self.truncate = truncate;
+        self
     }
 
     fn create(&mut self, create: bool) -> &mut Self {
-        todo!()
+        self.create = create;
+        self
     }
 
     fn create_new(&mut self, create_new: bool) -> &mut Self {
-        todo!()
+        self.create_new = create_new;
+        self
     }
 
-    async fn open<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File> {
-        todo!()
+    async fn open<P: AsRef<Path> + Send>(&self, _path: P) -> Result<Self::File> {
+        unimplemented!("support pending finding the right way to expose this API.")
     }
 }
 
 #[derive(Debug)]
-#[repr(transparent)]
-pub struct ExtFacadeFile();
+pub struct ExtFacadeFile<'a> {
+    facade: &'a ExtFacadeFloppyDisk,
+    file: ExtFile,
+    seek_position: std::io::SeekFrom,
+}
+unsafe impl Send for ExtFacadeFile<'_> {}
+unsafe impl Sync for ExtFacadeFile<'_> {}
 
 #[async_trait::async_trait]
-impl FloppyFile for ExtFacadeFile {
+impl FloppyFile for ExtFacadeFile<'_> {
     type Metadata = ExtFacadeMetadata;
     type Permissions = ExtFacadePermissions;
 
     async fn sync_all(&mut self) -> Result<()> {
-        todo!()
+        Ok(())
     }
 
     async fn sync_data(&mut self) -> Result<()> {
-        todo!()
+        Ok(())
     }
 
     async fn set_len(&mut self, size: u64) -> Result<()> {
-        todo!()
+        let fs = self.facade.fs.write().await;
+        let mut inode = fs.get_inode(&self.file).map_err(wrap_report)?;
+        // TODO: Support 64-bit inodes properly!
+        inode.1.i_size = size as u32;
+        fs.write_inode(&mut inode).map_err(wrap_report)?;
+        Ok(())
     }
 
     async fn metadata(&self) -> Result<Self::Metadata> {
-        todo!()
+        let fs = self.facade.fs.read().await;
+        let inode = fs.get_inode(&self.file).map_err(wrap_report)?;
+        Ok(ExtFacadeMetadata {
+            inode: DebugIgnore(inode),
+        })
     }
 
     async fn try_clone(&self) -> Result<Box<Self>> {
-        todo!()
+        unimplemented!("try_clone requires smarter pointer management for ExtFile to implement.")
     }
 
     async fn set_permissions(&self, perm: Self::Permissions) -> Result<()> {
-        todo!()
+        let fs = self.facade.fs.write().await;
+        let mut inode = fs.get_inode(&self.file).map_err(wrap_report)?;
+        inode.1.i_mode = (inode.1.i_mode & 0o70000) | perm.0;
+        fs.write_inode(&mut inode).map_err(wrap_report)?;
+        Ok(())
     }
 
     async fn permissions(&self) -> Result<Self::Permissions> {
-        todo!()
+        let fs = self.facade.fs.read().await;
+        let inode = fs.get_inode(&self.file).map_err(wrap_report)?;
+        Ok(ExtFacadePermissions(inode.1.i_mode))
     }
 }
 
-impl AsyncRead for ExtFacadeFile {
+impl AsyncRead for ExtFacadeFile<'_> {
     fn poll_read(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<()>> {
-        todo!()
+        // TODO: Respect seek position
+        let out_buf = run_here(async {
+            let fs = self.facade.fs.read().await;
+            let mut buf = vec![];
+            fs.read_file(&self.file, &mut buf)
+                .map_err(wrap_report)
+                .unwrap();
+            buf
+        });
+        // copy out_buf to buf
+        let len = buf.remaining().min(out_buf.len());
+        buf.put_slice(&out_buf[..len]);
+        Poll::Ready(Ok(()))
     }
 }
 
-impl AsyncSeek for ExtFacadeFile {
+impl AsyncSeek for ExtFacadeFile<'_> {
     fn start_seek(self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
-        todo!()
+        let mut this = self.get_mut();
+        this.seek_position = position;
+        Ok(())
     }
 
     fn poll_complete(
         self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<u64>> {
-        todo!()
+        let position = match self.seek_position {
+            std::io::SeekFrom::Start(pos) => pos as i64,
+            std::io::SeekFrom::End(pos) => run_here(async {
+                let fs = self.facade.fs.read().await;
+                let inode = fs.get_inode(&self.file).unwrap();
+                inode.1.i_size as i64 + pos
+            }),
+            std::io::SeekFrom::Current(pos) => run_here(async {
+                let fs = self.facade.fs.read().await;
+                let inode = fs.get_inode(&self.file).unwrap();
+                inode.1.i_size as i64 + pos
+            }),
+        };
+
+        Poll::Ready(Ok(position as u64))
     }
 }
 
-impl AsyncWrite for ExtFacadeFile {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
-        todo!()
+impl AsyncWrite for ExtFacadeFile<'_> {
+    fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+        let res = run_here(async {
+            let fs = self.facade.fs.write().await;
+            fs.write_file(&self.file, buf).map_err(wrap_report)
+        });
+        Poll::Ready(res)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        todo!()
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        todo!()
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -576,6 +719,24 @@ fn wrap_report(report: eyre::Report) -> std::io::Error {
 
 fn wrap_err<E: std::error::Error + Send + Sync + 'static>(err: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::Other, err)
+}
+
+fn run_here<F: Future>(fut: F) -> F::Output {
+    // TODO: This is evil
+    // Adapted from https://stackoverflow.com/questions/66035290
+    let handle = tokio::runtime::Handle::try_current().unwrap();
+    let _guard = handle.enter();
+    futures::executor::block_on(fut)
+}
+
+#[allow(unused)]
+fn run_here_outside_of_tokio_context<F: Future>(fut: F) -> F::Output {
+    // TODO: This is slightly less-evil than the previous one but still pretty bad
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(fut)
 }
 
 // #[derive(Debug)]
@@ -626,3 +787,6 @@ fn wrap_err<E: std::error::Error + Send + Sync + 'static>(err: E) -> std::io::Er
 //         &self.path
 //     }
 // }
+
+#[cfg(test)]
+mod tests {}

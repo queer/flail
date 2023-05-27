@@ -332,6 +332,7 @@ dependencies = [
  "debug-ignore",
  "eyre",
  "floppy-disk",
+ "futures",
  "getset",
  "lazy_static",
  "libc",
