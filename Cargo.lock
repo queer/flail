@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "flail"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "bitflags 2.2.1",
