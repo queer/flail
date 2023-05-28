@@ -430,6 +430,20 @@ impl FloppyPermissions for ExtFacadePermissions {
     }
 }
 
+impl FloppyUnixPermissions for ExtFacadePermissions {
+    fn mode(&self) -> u32 {
+        self.0 as u32
+    }
+
+    fn set_mode(&mut self, mode: u32) {
+        self.0 = mode as u16;
+    }
+
+    fn from_mode(mode: u32) -> Self {
+        Self(mode as u16)
+    }
+}
+
 #[derive(Debug)]
 pub struct ExtFacadeDirBuilder<'a> {
     facade: &'a ExtFacadeFloppyDisk,
