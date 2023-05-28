@@ -115,8 +115,11 @@ impl ExtFilesystem {
                 s_error_count: 0,
                 s_errors: 0,
                 s_feature_compat: 0,
-                s_feature_incompat: 0,
-                s_feature_ro_compat: 0,
+                s_feature_incompat: libe2fs_sys::EXT4_FEATURE_INCOMPAT_64BIT
+                    | libe2fs_sys::EXT3_FEATURE_INCOMPAT_EXTENTS,
+                s_feature_ro_compat: libe2fs_sys::EXT2_FEATURE_RO_COMPAT_LARGE_FILE
+                    | libe2fs_sys::EXT4_FEATURE_RO_COMPAT_HUGE_FILE
+                    | libe2fs_sys::EXT4_FEATURE_RO_COMPAT_DIR_NLINK,
                 s_first_data_block: 0,
                 s_first_error_block: 0,
                 s_first_error_errcode: 0,
@@ -1572,16 +1575,42 @@ mod tests {
         // create 16M fs image
         {
             let fs = ExtFilesystem::create(&img, 16 * 1024 * 1024)?;
+            let data = "hello flail";
+
+            debug!("write data: '{data}'");
+            let written = fs.write_to_file("/test.txt", data.as_bytes())?;
+
+            assert_eq!(data.len(), written);
+            debug!("wrote {written} bytes");
         }
 
         let fsck = std::process::Command::new("fsck.ext4")
             .arg("-f")
             .arg("-n")
-            .arg(img)
+            .arg(img.clone())
             .spawn()?
             .wait()?;
 
         assert!(fsck.success());
+
+        {
+            // read /test.txt
+            let fs = ExtFilesystem::open(
+                &img,
+                None,
+                Some(ExtFilesystemOpenFlags::OPEN_64BIT | ExtFilesystemOpenFlags::OPEN_RW),
+            )?;
+
+            let mut out_buffer = vec![0u8; 11];
+
+            let inode = fs.lookup("/", "/test.txt")?;
+            let file = fs.open_file(inode.0, None)?;
+            let read = fs.read_file(&file, &mut out_buffer)?;
+
+            assert_eq!(11, read);
+            debug!("read {read} bytes");
+            assert_eq!("hello flail", std::str::from_utf8(&out_buffer)?);
+        }
 
         Ok(())
     }
