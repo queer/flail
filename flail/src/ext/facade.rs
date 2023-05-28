@@ -40,6 +40,7 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
     type ReadDir = ExtFacadeReadDir;
     type Permissions = ExtFacadePermissions;
     type DirBuilder = ExtFacadeDirBuilder<'a>;
+    type OpenOptions = ExtFacadeOpenOptions<'a>;
 
     async fn canonicalize<P: AsRef<Path> + Send>(&self, _path: P) -> Result<PathBuf> {
         unimplemented!(
@@ -325,6 +326,18 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
             mode: None,
         }
     }
+
+    fn new_open_options(&'a self) -> Self::OpenOptions {
+        ExtFacadeOpenOptions {
+            facade: self,
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+        }
+    }
 }
 
 #[repr(transparent)]
@@ -548,7 +561,7 @@ impl FloppyFileType for ExtFacadeFileType {
 
 #[derive(Debug)]
 pub struct ExtFacadeOpenOptions<'a> {
-    _facade: &'a ExtFacadeFloppyDisk,
+    facade: &'a ExtFacadeFloppyDisk,
     read: bool,
     write: bool,
     append: bool,
@@ -560,10 +573,6 @@ pub struct ExtFacadeOpenOptions<'a> {
 #[async_trait::async_trait]
 impl<'a> FloppyOpenOptions for ExtFacadeOpenOptions<'a> {
     type File = ExtFacadeFile<'a>;
-
-    fn new() -> Self {
-        unimplemented!()
-    }
 
     fn read(&mut self, read: bool) -> &mut Self {
         self.read = read;
@@ -596,7 +605,36 @@ impl<'a> FloppyOpenOptions for ExtFacadeOpenOptions<'a> {
     }
 
     async fn open<P: AsRef<Path> + Send>(&self, _path: P) -> Result<Self::File> {
-        unimplemented!("support pending finding the right way to expose this API.")
+        let fs = self.facade.fs.write().await;
+        let path = _path.as_ref();
+        // TODO: FIXME: THIS DOESN'T HANDLE FLAGS RIGHT AAAAAAAAAAAAAAAAAAAAAAAAA
+        let file = match fs.find_inode(path) {
+            Ok(inode) => {
+                let file = fs.open_file(inode.0, None).map_err(wrap_report)?;
+                ExtFacadeFile {
+                    facade: self.facade,
+                    file,
+                    seek_position: std::io::SeekFrom::Start(0),
+                }
+            }
+            Err(err) => {
+                if self.create {
+                    let parent_inode = fs
+                        .find_inode(path.parent().unwrap_or(Path::new("/")))
+                        .map_err(wrap_report)?;
+                    let file = fs.touch(path).map_err(wrap_report)?;
+                    ExtFacadeFile {
+                        facade: self.facade,
+                        file,
+                        seek_position: std::io::SeekFrom::Start(0),
+                    }
+                } else {
+                    return Err(wrap_report(err));
+                }
+            }
+        };
+
+        Ok(file)
     }
 }
 

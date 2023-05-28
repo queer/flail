@@ -936,6 +936,80 @@ impl ExtFilesystem {
         }
     }
 
+    pub fn touch<P: Into<PathBuf>>(&self, path: P) -> Result<ExtFile> {
+        let fs = *self.0.write().unwrap();
+        let path = path.into();
+
+        let inum = unsafe {
+            let mut inum = MaybeUninit::<u32>::uninit();
+            let err = libe2fs_sys::ext2fs_namei(
+                fs,
+                Self::ROOT_INODE,
+                Self::ROOT_INODE,
+                CString::new(path.to_string_lossy().as_bytes())?.as_ptr(),
+                inum.as_mut_ptr(),
+            );
+            if err != 0 {
+                debug!("could not find inum, allocating new inode");
+                self.new_inode(Self::ROOT_INODE, 0)?.0
+            } else {
+                inum.assume_init()
+            }
+        };
+
+        let file = unsafe {
+            let mut file = MaybeUninit::<libe2fs_sys::ext2_file_t>::uninit();
+            let err = libe2fs_sys::ext2fs_file_open2(
+                fs,
+                inum,
+                std::ptr::null_mut(),
+                (ExtFileOpenFlags::CREATE | ExtFileOpenFlags::WRITE).bits(),
+                file.as_mut_ptr(),
+            );
+            if err != 0 {
+                return report(err);
+            }
+            file.assume_init()
+        };
+
+        unsafe {
+            let fs = *self.0.write().unwrap();
+            let mut inode = self.get_inode(&ExtFile(file, ExtFileState::Open))?;
+            // libe2fs_sys::ext2fs_file_close(file as *mut libe2fs_sys::ext2_file);
+            // debug!("closed file");
+            debug!("inode size: {}", inode.1.i_size);
+
+            inode.1.i_links_count = 1;
+
+            // write this inode
+            let err = libe2fs_sys::ext2fs_write_inode(fs, inum, &mut inode.1);
+            if err != 0 {
+                return report(err);
+            }
+            debug!("wrote inode");
+
+            // link the inode into the fs hierarchy!
+            let parent_inum = self.find_inode(path.parent().unwrap())?.0;
+            let file_name = path.file_name().unwrap();
+            debug!("linking {file_name:?} @ {inum} to parent inode {parent_inum}");
+            let file_name = CString::new(file_name.as_bytes())?;
+            let err = libe2fs_sys::ext2fs_link(
+                fs,
+                parent_inum,
+                file_name.as_ptr(),
+                inum,
+                libe2fs_sys::EXT2_FT_REG_FILE.try_into()?,
+            );
+            if err != 0 {
+                return report(err);
+            }
+        }
+
+        self.flush()?;
+
+        Ok(ExtFile(file, ExtFileState::Open))
+    }
+
     pub fn write_to_file<P: Into<PathBuf>>(&self, path: P, buf: &[u8]) -> Result<usize> {
         let fs = *self.0.write().unwrap();
         let path = path.into();
@@ -1017,19 +1091,6 @@ impl ExtFilesystem {
             if err != 0 {
                 return report(err);
             }
-
-            // update parent inode's counts
-            // let mut parent_inode = self.read_inode(parent_inum)?;
-            // debug!("found parent inode: {}", parent_inode.0);
-            // debug!("parent has links: {}", parent_inode.1.i_links_count);
-            // // TODO: FIXME: this doesn't work because ext2fs_link isn't doing the do right...
-            // parent_inode.1.i_links_count += 1;
-            // let err = libe2fs_sys::ext2fs_write_inode(fs, parent_inum, &mut parent_inode.1);
-            // if err != 0 {
-            //     return report(err);
-            // }
-            // debug!("wrote parent inode");
-            // debug!("parent has links: {}", parent_inode.1.i_links_count);
         }
 
         self.flush()?;
