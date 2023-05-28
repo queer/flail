@@ -2,8 +2,10 @@ use bitflags::bitflags;
 use eyre::{eyre, Result};
 use lazy_static::lazy_static;
 use log::*;
+use uuid::Uuid;
 
 use std::ffi::{CStr, CString};
+use std::fs::File;
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -43,6 +45,304 @@ lazy_static! {
 impl ExtFilesystem {
     pub const ROOT_INODE: u32 = libe2fs_sys::EXT2_ROOT_INO;
     pub const LPF_INODE: u32 = 11;
+
+    pub fn create<P: Into<PathBuf>>(path: P, size_bytes: u64) -> Result<Self> {
+        // create file of size_bytes at path
+        let path = path.into();
+        debug!(
+            "creating ext filesystem at {path:?} of size {size_bytes}",
+            path = path,
+            size_bytes = size_bytes
+        );
+        let file = File::create(&path)?;
+        file.set_len(size_bytes)?;
+
+        // initialise superblock
+        debug!("initialising superblock...");
+        let (err, fs) = unsafe {
+            let mut fs = MaybeUninit::uninit();
+            let block_size = 1_024;
+            let inode_ratio = 8_192;
+            let blocks_count = size_bytes / block_size;
+            let path = CString::new(path.to_string_lossy().as_bytes())?;
+
+            // hardware sector sizes
+            let mut lsector_size = 0;
+            let mut psector_size = 0;
+            let err = libe2fs_sys::ext2fs_get_device_sectsize(path.as_ptr(), &mut lsector_size);
+            if err != 0 {
+                return report(err);
+            }
+            let err =
+                libe2fs_sys::ext2fs_get_device_phys_sectsize(path.as_ptr(), &mut psector_size);
+            if err != 0 {
+                return report(err);
+            }
+
+            let mut superblock = libe2fs_sys::ext2_super_block {
+                s_rev_level: 1,
+                s_log_block_size: 0,
+                // TODO: validate
+                s_blocks_per_group: 0,
+                s_blocks_count: blocks_count as u32,
+                s_blocks_count_hi: (blocks_count >> 32) as u32,
+                s_first_meta_bg: 0,
+                s_log_cluster_size: 0,
+                s_desc_size: libe2fs_sys::EXT2_MIN_DESC_SIZE_64BIT as u16,
+                // we don't use old inode size because it's old
+                s_inode_size: 0,
+                s_inodes_count: (blocks_count * block_size / inode_ratio).try_into()?,
+                s_r_blocks_count: 5,
+
+                s_algorithm_usage_bitmap: 0,
+                s_backup_bgs: [0, 0],
+                s_checksum_seed: 0,
+                s_checksum: 0,
+                s_creator_os: libe2fs_sys::EXT2_OS_LINUX,
+                s_block_group_nr: 0,
+                s_checkinterval: 0,
+                s_checksum_type: 0,
+                s_clusters_per_group: 0,
+                s_def_hash_version: 0,
+                s_def_resgid: 0,
+                s_def_resuid: 0,
+                s_default_mount_opts: 0,
+                s_encoding: 0,
+                s_encoding_flags: 0,
+                s_encrypt_algos: [0, 0, 0, 0],
+                s_encrypt_pw_salt: [0; 16],
+                s_encryption_level: 0,
+                s_error_count: 0,
+                s_errors: 0,
+                s_feature_compat: 0,
+                s_feature_incompat: 0,
+                s_feature_ro_compat: 0,
+                s_first_data_block: 0,
+                s_first_error_block: 0,
+                s_first_error_errcode: 0,
+                s_first_error_func: [0; 32],
+                s_first_error_ino: 0,
+                s_first_error_line: 0,
+                s_first_error_time: 0,
+                s_first_error_time_hi: 0,
+                s_first_ino: 0,
+                s_flags: 0,
+                s_free_blocks_count: 0,
+                s_free_blocks_hi: 0,
+                s_free_inodes_count: 0,
+                s_grp_quota_inum: 0,
+                s_hash_seed: [0; 4],
+                s_kbytes_written: 0,
+                s_last_error_block: 0,
+                s_last_error_errcode: 0,
+                s_last_error_func: [0; 32],
+                s_last_error_ino: 0,
+                s_last_error_line: 0,
+                s_last_error_time: 0,
+                s_last_error_time_hi: 0,
+                s_last_mounted: [0; 64],
+                s_last_orphan: 0,
+                s_inodes_per_group: 0,
+                s_jnl_backup_type: 0,
+                s_jnl_blocks: [0; 17],
+                s_journal_dev: 0,
+                s_journal_inum: 0,
+                s_journal_uuid: [0; 16],
+                s_lastcheck: 0,
+                s_lastcheck_hi: 0,
+                s_log_groups_per_flex: 0,
+                s_max_mnt_count: 0,
+                s_mmp_block: 0,
+                s_mmp_update_interval: 0,
+                s_mtime: 0,
+                s_mtime_hi: 0,
+                s_mkfs_time: 0,
+                s_mkfs_time_hi: 0,
+                s_mount_opts: [0; 64],
+                s_prealloc_blocks: 0,
+                s_prealloc_dir_blocks: 0,
+                s_lpf_ino: 0,
+                s_magic: libe2fs_sys::EXT2_SUPER_MAGIC.try_into()?,
+                s_min_extra_isize: 0,
+                s_minor_rev_level: 0,
+                s_mnt_count: 0,
+                s_orphan_file_inum: 0,
+                s_overhead_clusters: 0,
+                s_prj_quota_inum: 0,
+                s_r_blocks_count_hi: 0,
+                s_raid_stride: 0,
+                s_raid_stripe_width: 0,
+                s_reserved: [0; 94],
+                s_reserved_gdt_blocks: 0,
+                s_reserved_pad: 0,
+                s_snapshot_id: 0,
+                s_snapshot_inum: 0,
+                s_snapshot_list: 0,
+                s_snapshot_r_blocks_count: 0,
+                s_state: 0,
+                s_usr_quota_inum: 0,
+                s_uuid: [0; 16],
+                s_volume_name: [0; 16],
+                s_want_extra_isize: 0,
+                s_wtime: 0,
+                s_wtime_hi: 0,
+            };
+            let io_manager = DEFAULT_IO_MANAGER.clone().0;
+            let mut io_manager = io_manager.write().unwrap();
+            let err = libe2fs_sys::ext2fs_initialize(
+                path.as_ptr(),
+                (libe2fs_sys::EXT2_FLAG_EXCLUSIVE
+                    | libe2fs_sys::EXT2_FLAG_64BITS
+                    | libe2fs_sys::EXT2_FLAG_SKIP_MMP
+                    | libe2fs_sys::EXT2_FLAG_RW) as i32,
+                &mut superblock as *mut _,
+                &mut *io_manager,
+                fs.as_mut_ptr(),
+            );
+            (err, fs)
+        };
+
+        if err != 0 {
+            return report(err);
+        }
+
+        let fs: libe2fs_sys::ext2_filsys = unsafe { fs.assume_init() };
+
+        // we skip journals for now
+        // TODO: support journaling
+
+        debug!("updating superblock accounting...");
+        unsafe { *(*fs).super_ }.s_kbytes_written = 1;
+
+        debug!("generating uuid...");
+        let uuid = Uuid::new_v4();
+        let uuid = uuid.as_bytes();
+        unsafe { *(*fs).super_ }.s_uuid = *uuid;
+
+        // TODO: support setting periodic fsck
+
+        debug!("setting creatoros...");
+        let creatoros = libe2fs_sys::EXT2_OS_LINUX;
+        unsafe { *(*fs).super_ }.s_creator_os = creatoros;
+
+        debug!("setting volume label...");
+        unsafe { *(*fs).super_ }.s_volume_name = [
+            'f'.try_into()?,
+            'l'.try_into()?,
+            'a'.try_into()?,
+            'i'.try_into()?,
+            'l'.try_into()?,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+
+        debug!("setting checksum...");
+        unsafe { *(*fs).super_ }.s_checksum_type = libe2fs_sys::EXT2_CRC32C_CHKSUM as u8;
+
+        debug!("allocating group tables...");
+        let err = unsafe { libe2fs_sys::ext2fs_allocate_tables(fs) };
+        if err != 0 {
+            return report(err);
+        }
+
+        // ext2fs_convert_subcluster_bitmap(fs, &fs->block_map);
+        // whatever that is
+        debug!("converting subcluster bitmaps...");
+        let err =
+            unsafe { libe2fs_sys::ext2fs_convert_subcluster_bitmap(fs, &mut (*fs).block_map) };
+        if err != 0 {
+            return report(err);
+        }
+
+        // calculate overhead
+        debug!("calculating overhead...");
+        let mut overhead: u64 = 0;
+        let err = unsafe {
+            libe2fs_sys::ext2fs_count_used_clusters(
+                fs,
+                (*(*fs).super_).s_first_data_block as u64,
+                libe2fs_sys::ext2fs_blocks_count((*fs).super_) - 1,
+                &mut overhead,
+            )
+        };
+        if err != 0 {
+            return report(err);
+        }
+
+        // TODO: support mmp someday
+
+        // set overhead clusters (we read this earlier)
+        unsafe { *(*fs).super_ }.s_overhead_clusters = overhead as u32;
+
+        debug!("updating accounting...");
+        unsafe { *(*fs).super_ }.s_checkinterval = 0;
+        unsafe { *(*fs).super_ }.s_max_mnt_count = 1;
+
+        debug!("flushing!");
+        let err = unsafe { libe2fs_sys::ext2fs_flush(fs) };
+        if err != 0 {
+            return report(err);
+        }
+
+        debug!("creating root dir...");
+        let err = unsafe {
+            libe2fs_sys::ext2fs_mkdir(fs, Self::ROOT_INODE, Self::ROOT_INODE, std::ptr::null_mut())
+        };
+        if err != 0 {
+            return report(err);
+        }
+
+        debug!("creating l+f...");
+        let err = unsafe {
+            libe2fs_sys::ext2fs_mkdir(
+                fs,
+                Self::ROOT_INODE,
+                0,
+                "lost+found".as_bytes().as_ptr() as *const i8,
+            )
+        };
+        if err != 0 {
+            return report(err);
+        }
+
+        debug!("reserving inodes...");
+        for i in Self::ROOT_INODE + 1..unsafe { *(*fs).super_ }.s_first_ino {
+            unsafe {
+                libe2fs_sys::ext2fs_inode_alloc_stats2(fs, i, 1, 0);
+            }
+        }
+        unsafe {
+            (*fs).flags |=
+                (libe2fs_sys::EXT2_FLAG_IB_DIRTY | libe2fs_sys::EXT2_FLAG_CHANGED) as i32;
+        }
+
+        debug!("creating bad block inode...");
+        unsafe {
+            libe2fs_sys::ext2fs_mark_generic_bitmap((*fs).inode_map, libe2fs_sys::EXT2_BAD_INO);
+            libe2fs_sys::ext2fs_inode_alloc_stats2(fs, libe2fs_sys::EXT2_BAD_INO, 1, 0);
+            let err = libe2fs_sys::ext2fs_update_bb_inode(fs, std::ptr::null_mut());
+            if err != 0 {
+                return report(err);
+            }
+        }
+
+        debug!("flushing!");
+        let err = unsafe { libe2fs_sys::ext2fs_flush(fs) };
+        if err != 0 {
+            return report(err);
+        }
+
+        Ok(Self(Arc::new(RwLock::new(fs)), path))
+    }
 
     pub fn open<P: Into<PathBuf> + std::fmt::Debug>(
         name: P,
@@ -1259,6 +1559,29 @@ mod tests {
 
             assert!(fsck.success());
         }
+
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_making_new_fs_works() -> Result<()> {
+        let temp = TempDir::new()?;
+        let img = temp.path_view().join("test.img");
+        dbg!(&img);
+
+        // create 16M fs image
+        {
+            let fs = ExtFilesystem::create(&img, 16 * 1024 * 1024)?;
+        }
+
+        let fsck = std::process::Command::new("fsck.ext4")
+            .arg("-f")
+            .arg("-n")
+            .arg(img)
+            .spawn()?
+            .wait()?;
+
+        assert!(fsck.success());
 
         Ok(())
     }
