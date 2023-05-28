@@ -340,6 +340,17 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
     }
 }
 
+#[async_trait::async_trait]
+impl FloppyDiskUnixExt for ExtFacadeFloppyDisk {
+    async fn chown<P: Into<PathBuf> + Send>(&self, path: P, uid: u32, gid: u32) -> Result<()> {
+        let fs = self.fs.write().await;
+        let mut inode = fs.find_inode(path.into()).map_err(wrap_report)?;
+        inode.1.i_uid = uid as u16;
+        inode.1.i_gid = gid as u16;
+        fs.write_inode(&mut inode).map_err(wrap_report)
+    }
+}
+
 #[repr(transparent)]
 #[derive(Debug)]
 pub struct ExtFacadeMetadata {
@@ -619,9 +630,6 @@ impl<'a> FloppyOpenOptions for ExtFacadeOpenOptions<'a> {
             }
             Err(err) => {
                 if self.create {
-                    let parent_inode = fs
-                        .find_inode(path.parent().unwrap_or(Path::new("/")))
-                        .map_err(wrap_report)?;
                     let file = fs.touch(path).map_err(wrap_report)?;
                     ExtFacadeFile {
                         facade: self.facade,
