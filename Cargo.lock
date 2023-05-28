@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "flail"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
  "bitflags 2.3.1",
@@ -294,9 +294,9 @@ dependencies = [
 
 [[package]]
 name = "floppy-disk"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8734e4dbaf5070cac02c1152fd4dfffc1889a48f0f2ce3788602a372331a1d5"
+checksum = "50f87d22b61786cdc54b4a27023b90bb2c748bf719376016bb6e20e3f1ddc1ab"
 dependencies = [
  "async-trait",
  "derivative",

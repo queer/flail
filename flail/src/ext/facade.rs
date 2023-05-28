@@ -400,6 +400,16 @@ impl FloppyMetadata for ExtFacadeMetadata {
     }
 }
 
+impl FloppyUnixMetadata for ExtFacadeMetadata {
+    fn uid(&self) -> Result<u32> {
+        Ok(self.inode.0 .1.i_uid as u32)
+    }
+
+    fn gid(&self) -> Result<u32> {
+        Ok(self.inode.0 .1.i_gid as u32)
+    }
+}
+
 #[derive(Debug)]
 pub struct ExtFacadeReadDir {
     idx: usize,
