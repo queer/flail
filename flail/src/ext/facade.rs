@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 
 use super::file::ExtFile;
 use super::inode::ExtInode;
-use super::ExtFileOpenFlags;
+use super::{ExtFileOpenFlags, ExtFilesystemOpenFlags};
 
 #[derive(Debug, Clone)]
 pub struct ExtFacadeFloppyDisk {
@@ -29,7 +29,12 @@ impl ExtFacadeFloppyDisk {
     pub fn new<P: Into<PathBuf> + std::fmt::Debug>(path: P) -> Result<Self> {
         Ok(Self {
             fs: Arc::new(RwLock::new(
-                super::ExtFilesystem::open(path, None, None).map_err(wrap_report)?,
+                super::ExtFilesystem::open(
+                    path,
+                    None,
+                    Some(ExtFilesystemOpenFlags::OPEN_64BIT | ExtFilesystemOpenFlags::OPEN_RW),
+                )
+                .map_err(wrap_report)?,
             )),
         })
     }
@@ -647,7 +652,7 @@ impl<'a> FloppyOpenOptions<'a, ExtFacadeFloppyDisk> for ExtFacadeOpenOptions {
         let fs = facade.fs.write().await;
         let file = match fs.find_inode(path) {
             Ok(inode) => {
-                let file = fs.open_file(inode.0, None).map_err(wrap_report)?;
+                let file = fs.open_file(inode.0, Some(flags)).map_err(wrap_report)?;
                 ExtFacadeFile {
                     facade,
                     file,
@@ -875,4 +880,28 @@ fn run_here_outside_of_tokio_context<F: Future>(fut: F) -> F::Output {
 // }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::super::tests::TempImage;
+    use super::*;
+    use eyre::Result;
+
+    #[tokio::test]
+    async fn test() -> Result<()> {
+        let img = TempImage::new("./fixtures/empty.ext4")?;
+
+        let facade = ExtFacadeFloppyDisk::new(img.path_view())?;
+
+        let data = "hello flail!".as_bytes().to_vec();
+
+        let mut file = ExtFacadeOpenOptions::new()
+            .create(true)
+            .create_new(true)
+            .write(true)
+            .open(&facade, "/asdf")
+            .await?;
+
+        tokio::io::copy(&mut data.as_slice(), &mut file).await?;
+
+        Ok(())
+    }
+}

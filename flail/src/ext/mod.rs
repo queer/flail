@@ -965,22 +965,22 @@ impl ExtFilesystem {
             }
         };
 
-        let file = unsafe {
-            let mut file = MaybeUninit::<libe2fs_sys::ext2_file_t>::uninit();
-            let err = libe2fs_sys::ext2fs_file_open2(
-                fs,
-                inum,
-                std::ptr::null_mut(),
-                (ExtFileOpenFlags::CREATE | ExtFileOpenFlags::WRITE).bits(),
-                file.as_mut_ptr(),
-            );
-            if err != 0 {
-                return report(err);
-            }
-            file.assume_init()
-        };
-
         unsafe {
+            let file = {
+                let mut file = MaybeUninit::<libe2fs_sys::ext2_file_t>::uninit();
+                let err = libe2fs_sys::ext2fs_file_open2(
+                    fs,
+                    inum,
+                    std::ptr::null_mut(),
+                    (ExtFileOpenFlags::CREATE | ExtFileOpenFlags::WRITE).bits(),
+                    file.as_mut_ptr(),
+                );
+                if err != 0 {
+                    return report(err);
+                }
+                file.assume_init()
+            };
+
             let fs = *self.0.write().unwrap();
             let mut inode = self.get_inode(&ExtFile(file, ExtFileState::Open))?;
             debug!("inode size: {}", inode.1.i_size);
@@ -1013,7 +1013,9 @@ impl ExtFilesystem {
 
         self.flush()?;
 
-        Ok(ExtFile(file, ExtFileState::Open))
+        let file = self.open_file(self.find_inode(path)?.0, Some(ExtFileOpenFlags::WRITE))?;
+
+        Ok(file)
     }
 
     pub fn write_to_file<P: Into<PathBuf>>(&self, path: P, buf: &[u8]) -> Result<usize> {
@@ -1395,10 +1397,10 @@ mod tests {
         pretty_env_logger::init();
     }
 
-    struct TempImage(PathBuf, TempDir);
+    pub struct TempImage(PathBuf, TempDir);
 
     impl TempImage {
-        fn new<P: Into<PathBuf>>(path: P) -> Result<Self> {
+        pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self> {
             let path = path.into();
             let tmp = TempDir::new()?;
             let mut tmp_path = tmp.path_view();
@@ -1409,7 +1411,7 @@ mod tests {
         }
 
         #[allow(unused)]
-        fn path_view(&self) -> &Path {
+        pub fn path_view(&self) -> &Path {
             &self.0
         }
     }
