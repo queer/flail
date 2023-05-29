@@ -267,7 +267,7 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
     }
 
     async fn set_permissions<P: AsRef<Path> + Send>(
-        &mut self,
+        &self,
         path: P,
         perm: Self::Permissions,
     ) -> Result<()> {
@@ -353,39 +353,39 @@ pub struct ExtFacadeMetadata {
 
 #[async_trait::async_trait]
 impl<'a> FloppyMetadata<'a, ExtFacadeFloppyDisk> for ExtFacadeMetadata {
-    async fn file_type(&self) -> <ExtFacadeFloppyDisk as FloppyDisk<'a>>::FileType {
+    fn file_type(&self) -> <ExtFacadeFloppyDisk as FloppyDisk<'a>>::FileType {
         ExtFacadeFileType { inode: self.inode }
     }
 
-    async fn is_dir(&self) -> bool {
+    fn is_dir(&self) -> bool {
         self.inode.is_dir()
     }
 
-    async fn is_file(&self) -> bool {
+    fn is_file(&self) -> bool {
         self.inode.is_file()
     }
 
-    async fn is_symlink(&self) -> bool {
+    fn is_symlink(&self) -> bool {
         self.inode.is_symlink()
     }
 
-    async fn len(&self) -> u64 {
+    fn len(&self) -> u64 {
         self.inode.size()
     }
 
-    async fn permissions(&self) -> <ExtFacadeFloppyDisk as FloppyDisk<'a>>::Permissions {
+    fn permissions(&self) -> <ExtFacadeFloppyDisk as FloppyDisk<'a>>::Permissions {
         ExtFacadePermissions(self.inode.mode())
     }
 
-    async fn modified(&self) -> Result<SystemTime> {
+    fn modified(&self) -> Result<SystemTime> {
         self.inode.mtime().map_err(wrap_report)
     }
 
-    async fn accessed(&self) -> Result<SystemTime> {
+    fn accessed(&self) -> Result<SystemTime> {
         self.inode.atime().map_err(wrap_report)
     }
 
-    async fn created(&self) -> Result<SystemTime> {
+    fn created(&self) -> Result<SystemTime> {
         self.inode.ctime().map_err(wrap_report)
     }
 }
@@ -622,7 +622,7 @@ impl<'a> FloppyOpenOptions<'a, ExtFacadeFloppyDisk> for ExtFacadeOpenOptions {
 
     async fn open<P: AsRef<Path> + Send>(
         &self,
-        facade: &'a mut ExtFacadeFloppyDisk,
+        facade: &'a ExtFacadeFloppyDisk,
         _path: P,
     ) -> Result<<ExtFacadeFloppyDisk as FloppyDisk<'a>>::File> {
         let path = _path.as_ref();
