@@ -310,14 +310,8 @@ impl ExtFilesystem {
         }
 
         debug!("creating l+f...");
-        let err = unsafe {
-            libe2fs_sys::ext2fs_mkdir(
-                fs,
-                Self::ROOT_INODE,
-                0,
-                "lost+found".as_bytes().as_ptr() as *const i8,
-            )
-        };
+        let lpf_name = CString::new("lost+found")?;
+        let err = unsafe { libe2fs_sys::ext2fs_mkdir(fs, Self::ROOT_INODE, 0, lpf_name.as_ptr()) };
         if err != 0 {
             return report(err);
         }
@@ -875,16 +869,13 @@ impl ExtFilesystem {
             "mkdir {}/{name}",
             parent.display().to_string().trim_end_matches('/')
         );
+        let name = CString::new(name)?.as_bytes_with_nul().as_ptr();
         let parent_inode = self.find_inode(&parent)?;
+        let fs = self.0.write().unwrap();
         let err = unsafe {
             // pass 0 to automatically allocate new inode
             // http://fs.csl.utoronto.ca/~sunk/libext2fs.html#Creating-and-expanding-directories
-            libe2fs_sys::ext2fs_mkdir(
-                self.0.read().unwrap().as_mut().unwrap(),
-                parent_inode.0,
-                0,
-                CString::new(name)?.as_ptr(),
-            )
+            libe2fs_sys::ext2fs_mkdir(*fs, parent_inode.0, 0, name as *mut _)
         };
         if err == 0 {
             Ok(())
