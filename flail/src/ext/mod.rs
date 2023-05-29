@@ -330,7 +330,10 @@ impl ExtFilesystem {
 
         debug!("creating bad block inode...");
         unsafe {
-            libe2fs_sys::ext2fs_mark_generic_bitmap((*fs).inode_map, libe2fs_sys::EXT2_BAD_INO);
+            libe2fs_sys::ext2fs_mark_generic_bmap(
+                (*fs).inode_map,
+                libe2fs_sys::EXT2_BAD_INO as u64,
+            );
             libe2fs_sys::ext2fs_inode_alloc_stats2(fs, libe2fs_sys::EXT2_BAD_INO, 1, 0);
             let err = libe2fs_sys::ext2fs_update_bb_inode(fs, std::ptr::null_mut());
             if err != 0 {
