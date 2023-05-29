@@ -32,6 +32,14 @@ impl ExtFacadeFloppyDisk {
             )),
         })
     }
+
+    pub fn create<P: Into<PathBuf> + std::fmt::Debug>(path: P, size_bytes: u64) -> Result<Self> {
+        Ok(Self {
+            fs: Arc::new(RwLock::new(
+                super::ExtFilesystem::create(path, size_bytes).map_err(wrap_report)?,
+            )),
+        })
+    }
 }
 
 #[async_trait::async_trait]
