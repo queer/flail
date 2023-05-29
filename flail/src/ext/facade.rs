@@ -36,11 +36,14 @@ impl ExtFacadeFloppyDisk {
 
 #[async_trait::async_trait]
 impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
-    type Metadata = ExtFacadeMetadata;
-    type ReadDir = ExtFacadeReadDir;
-    type Permissions = ExtFacadePermissions;
     type DirBuilder = ExtFacadeDirBuilder<'a>;
-    type OpenOptions = ExtFacadeOpenOptions<'a>;
+    type DirEntry = ExtFacadeDirEntry;
+    type File = ExtFacadeFile<'a>;
+    type FileType = ExtFacadeFileType;
+    type Metadata = ExtFacadeMetadata;
+    type OpenOptions = ExtFacadeOpenOptions;
+    type Permissions = ExtFacadePermissions;
+    type ReadDir = ExtFacadeReadDir;
 
     async fn canonicalize<P: AsRef<Path> + Send>(&self, _path: P) -> Result<PathBuf> {
         unimplemented!(
@@ -165,7 +168,10 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
         }
     }
 
-    async fn read_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::ReadDir> {
+    async fn read_dir<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+    ) -> Result<<ExtFacadeFloppyDisk as FloppyDisk<'a>>::ReadDir> {
         let fs = self.fs.read().await;
         let mut inodes = vec![];
         let path = path.as_ref();
@@ -319,23 +325,11 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
             .map_err(wrap_report)
     }
 
-    fn new_dir_builder(&'a self) -> Self::DirBuilder {
+    fn new_dir_builder(&'a self) -> <ExtFacadeFloppyDisk as FloppyDisk<'a>>::DirBuilder {
         ExtFacadeDirBuilder {
             facade: self,
             recursive: false,
             mode: None,
-        }
-    }
-
-    fn new_open_options(&'a self) -> Self::OpenOptions {
-        ExtFacadeOpenOptions {
-            facade: self,
-            read: false,
-            write: false,
-            append: false,
-            truncate: false,
-            create: false,
-            create_new: false,
         }
     }
 }
@@ -358,12 +352,8 @@ pub struct ExtFacadeMetadata {
 }
 
 #[async_trait::async_trait]
-impl FloppyMetadata for ExtFacadeMetadata {
-    type FileType = ExtFacadeFileType;
-
-    type Permissions = ExtFacadePermissions;
-
-    async fn file_type(&self) -> Self::FileType {
+impl<'a> FloppyMetadata<'a, ExtFacadeFloppyDisk> for ExtFacadeMetadata {
+    async fn file_type(&self) -> <ExtFacadeFloppyDisk as FloppyDisk<'a>>::FileType {
         ExtFacadeFileType { inode: self.inode }
     }
 
@@ -383,7 +373,7 @@ impl FloppyMetadata for ExtFacadeMetadata {
         self.inode.size()
     }
 
-    async fn permissions(&self) -> Self::Permissions {
+    async fn permissions(&self) -> <ExtFacadeFloppyDisk as FloppyDisk<'a>>::Permissions {
         ExtFacadePermissions(self.inode.mode())
     }
 
@@ -428,10 +418,10 @@ impl ExtFacadeReadDir {
 }
 
 #[async_trait::async_trait]
-impl FloppyReadDir for ExtFacadeReadDir {
-    type DirEntry = ExtFacadeDirEntry;
-
-    async fn next_entry(&mut self) -> Result<Option<Self::DirEntry>> {
+impl<'a> FloppyReadDir<'a, ExtFacadeFloppyDisk> for ExtFacadeReadDir {
+    async fn next_entry(
+        &mut self,
+    ) -> Result<Option<<ExtFacadeFloppyDisk as FloppyDisk<'a>>::DirEntry>> {
         if self.idx < self.inodes.len() {
             let (inode, dir_entry) = self.inodes[0];
             self.idx += 1;
@@ -527,10 +517,7 @@ pub struct ExtFacadeDirEntry {
 }
 
 #[async_trait::async_trait]
-impl FloppyDirEntry for ExtFacadeDirEntry {
-    type FileType = ExtFacadeFileType;
-    type Metadata = ExtFacadeMetadata;
-
+impl<'a> FloppyDirEntry<'a, ExtFacadeFloppyDisk> for ExtFacadeDirEntry {
     fn file_name(&self) -> OsString {
         // SAFETY: We just got this struct (and therefore pointer) from e2fs.
         unsafe {
@@ -542,7 +529,7 @@ impl FloppyDirEntry for ExtFacadeDirEntry {
         }
     }
 
-    async fn file_type(&self) -> Result<Self::FileType> {
+    async fn file_type(&self) -> Result<<ExtFacadeFloppyDisk as FloppyDisk<'a>>::FileType> {
         Ok(ExtFacadeFileType { inode: self.inode })
     }
 
@@ -581,8 +568,7 @@ impl FloppyFileType for ExtFacadeFileType {
 }
 
 #[derive(Debug)]
-pub struct ExtFacadeOpenOptions<'a> {
-    facade: &'a ExtFacadeFloppyDisk,
+pub struct ExtFacadeOpenOptions {
     read: bool,
     write: bool,
     append: bool,
@@ -592,48 +578,61 @@ pub struct ExtFacadeOpenOptions<'a> {
 }
 
 #[async_trait::async_trait]
-impl<'a> FloppyOpenOptions for ExtFacadeOpenOptions<'a> {
-    type File = ExtFacadeFile<'a>;
+impl<'a> FloppyOpenOptions<'a, ExtFacadeFloppyDisk> for ExtFacadeOpenOptions {
+    fn new() -> Self {
+        Self {
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+        }
+    }
 
-    fn read(&mut self, read: bool) -> &mut Self {
+    fn read(mut self, read: bool) -> Self {
         self.read = read;
         self
     }
 
-    fn write(&mut self, write: bool) -> &mut Self {
+    fn write(mut self, write: bool) -> Self {
         self.write = write;
         self
     }
 
-    fn append(&mut self, append: bool) -> &mut Self {
+    fn append(mut self, append: bool) -> Self {
         self.append = append;
         self
     }
 
-    fn truncate(&mut self, truncate: bool) -> &mut Self {
+    fn truncate(mut self, truncate: bool) -> Self {
         self.truncate = truncate;
         self
     }
 
-    fn create(&mut self, create: bool) -> &mut Self {
+    fn create(mut self, create: bool) -> Self {
         self.create = create;
         self
     }
 
-    fn create_new(&mut self, create_new: bool) -> &mut Self {
+    fn create_new(mut self, create_new: bool) -> Self {
         self.create_new = create_new;
         self
     }
 
-    async fn open<P: AsRef<Path> + Send>(&self, _path: P) -> Result<Self::File> {
-        let fs = self.facade.fs.write().await;
+    async fn open<P: AsRef<Path> + Send>(
+        &self,
+        facade: &'a mut ExtFacadeFloppyDisk,
+        _path: P,
+    ) -> Result<<ExtFacadeFloppyDisk as FloppyDisk<'a>>::File> {
         let path = _path.as_ref();
         // TODO: FIXME: THIS DOESN'T HANDLE FLAGS RIGHT AAAAAAAAAAAAAAAAAAAAAAAAA
+        let fs = facade.fs.write().await;
         let file = match fs.find_inode(path) {
             Ok(inode) => {
                 let file = fs.open_file(inode.0, None).map_err(wrap_report)?;
                 ExtFacadeFile {
-                    facade: self.facade,
+                    facade,
                     file,
                     seek_position: std::io::SeekFrom::Start(0),
                 }
@@ -642,7 +641,7 @@ impl<'a> FloppyOpenOptions for ExtFacadeOpenOptions<'a> {
                 if self.create {
                     let file = fs.touch(path).map_err(wrap_report)?;
                     ExtFacadeFile {
-                        facade: self.facade,
+                        facade,
                         file,
                         seek_position: std::io::SeekFrom::Start(0),
                     }
@@ -666,10 +665,7 @@ unsafe impl Send for ExtFacadeFile<'_> {}
 unsafe impl Sync for ExtFacadeFile<'_> {}
 
 #[async_trait::async_trait]
-impl FloppyFile for ExtFacadeFile<'_> {
-    type Metadata = ExtFacadeMetadata;
-    type Permissions = ExtFacadePermissions;
-
+impl<'a> FloppyFile<'a, ExtFacadeFloppyDisk> for ExtFacadeFile<'a> {
     async fn sync_all(&mut self) -> Result<()> {
         Ok(())
     }
@@ -687,7 +683,7 @@ impl FloppyFile for ExtFacadeFile<'_> {
         Ok(())
     }
 
-    async fn metadata(&self) -> Result<Self::Metadata> {
+    async fn metadata(&self) -> Result<<ExtFacadeFloppyDisk as FloppyDisk<'a>>::Metadata> {
         let fs = self.facade.fs.read().await;
         let inode = fs.get_inode(&self.file).map_err(wrap_report)?;
         Ok(ExtFacadeMetadata {
@@ -695,11 +691,14 @@ impl FloppyFile for ExtFacadeFile<'_> {
         })
     }
 
-    async fn try_clone(&self) -> Result<Box<Self>> {
+    async fn try_clone(&'a self) -> Result<Box<<ExtFacadeFloppyDisk as FloppyDisk<'a>>::File>> {
         unimplemented!("try_clone requires smarter pointer management for ExtFile to implement.")
     }
 
-    async fn set_permissions(&self, perm: Self::Permissions) -> Result<()> {
+    async fn set_permissions(
+        &self,
+        perm: <ExtFacadeFloppyDisk as FloppyDisk<'a>>::Permissions,
+    ) -> Result<()> {
         let fs = self.facade.fs.write().await;
         let mut inode = fs.get_inode(&self.file).map_err(wrap_report)?;
         inode.1.i_mode = (inode.1.i_mode & 0o70000) | perm.0;
@@ -707,7 +706,7 @@ impl FloppyFile for ExtFacadeFile<'_> {
         Ok(())
     }
 
-    async fn permissions(&self) -> Result<Self::Permissions> {
+    async fn permissions(&self) -> Result<<ExtFacadeFloppyDisk as FloppyDisk<'a>>::Permissions> {
         let fs = self.facade.fs.read().await;
         let inode = fs.get_inode(&self.file).map_err(wrap_report)?;
         Ok(ExtFacadePermissions(inode.1.i_mode))
@@ -853,7 +852,7 @@ fn run_here_outside_of_tokio_context<F: Future>(fut: F) -> F::Output {
 // impl std::ops::Deref for ExtFacadeTempDir {
 //     type Target = Path;
 
-//     fn deref(&self) -> &Self::Target {
+//     fn deref(&self) -> &<ExtFacadeFloppyDisk as FloppyDisk<'a>>::Target {
 //         &self.path
 //     }
 // }
