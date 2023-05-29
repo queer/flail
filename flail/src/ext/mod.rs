@@ -5,7 +5,7 @@ use log::*;
 use uuid::Uuid;
 
 use std::ffi::{CStr, CString};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -983,8 +983,6 @@ impl ExtFilesystem {
         unsafe {
             let fs = *self.0.write().unwrap();
             let mut inode = self.get_inode(&ExtFile(file, ExtFileState::Open))?;
-            // libe2fs_sys::ext2fs_file_close(file as *mut libe2fs_sys::ext2_file);
-            // debug!("closed file");
             debug!("inode size: {}", inode.1.i_size);
 
             inode.1.i_links_count = 1;
@@ -1071,8 +1069,8 @@ impl ExtFilesystem {
         unsafe {
             let fs = *self.0.write().unwrap();
             let mut inode = self.get_inode(&ExtFile(file, ExtFileState::Open))?;
-            libe2fs_sys::ext2fs_file_close(file as *mut libe2fs_sys::ext2_file);
-            debug!("closed file");
+            // libe2fs_sys::ext2fs_file_close(file as *mut libe2fs_sys::ext2_file);
+            // debug!("closed file");
             debug!("inode size: {}", inode.1.i_size);
 
             inode.1.i_links_count = 1;
@@ -1318,7 +1316,7 @@ pub trait ExtBitmap {
     fn is_64bit(&self) -> bool;
 }
 
-fn report<T>(error: i64) -> Result<T> {
+pub(crate) fn report<T>(error: i64) -> Result<T> {
     if error > 100_000 {
         let err: ExtEtMessage = error.into();
         Err(err.into())
