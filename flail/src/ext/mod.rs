@@ -5,7 +5,7 @@ use log::*;
 use uuid::Uuid;
 
 use std::ffi::{CStr, CString};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -54,7 +54,12 @@ impl ExtFilesystem {
             path = path,
             size_bytes = size_bytes
         );
-        let file = File::create(&path)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .read(true)
+            .create_new(true)
+            .open(&path)?;
         file.set_len(size_bytes)?;
 
         // initialise superblock
