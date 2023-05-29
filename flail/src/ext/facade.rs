@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 
 use super::file::ExtFile;
 use super::inode::ExtInode;
+use super::ExtFileOpenFlags;
 
 #[derive(Debug, Clone)]
 pub struct ExtFacadeFloppyDisk {
@@ -633,8 +634,16 @@ impl<'a> FloppyOpenOptions<'a, ExtFacadeFloppyDisk> for ExtFacadeOpenOptions {
         facade: &'a ExtFacadeFloppyDisk,
         _path: P,
     ) -> Result<<ExtFacadeFloppyDisk as FloppyDisk<'a>>::File> {
+        let mut flags = ExtFileOpenFlags::empty();
+        if self.create || self.create_new {
+            flags.insert(ExtFileOpenFlags::CREATE);
+        }
+        if self.write {
+            flags.insert(ExtFileOpenFlags::WRITE);
+        }
+        // TODO: Handle truncate, append
+
         let path = _path.as_ref();
-        // TODO: FIXME: THIS DOESN'T HANDLE FLAGS RIGHT AAAAAAAAAAAAAAAAAAAAAAAAA
         let fs = facade.fs.write().await;
         let file = match fs.find_inode(path) {
             Ok(inode) => {
