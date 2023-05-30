@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use debug_ignore::DebugIgnore;
 use floppy_disk::prelude::*;
+use log::debug;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use tokio::sync::RwLock;
 
@@ -173,6 +174,8 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
                 }
 
                 let file = fs.open_file(inode.0, None).map_err(wrap_report)?;
+                fs.seek(&file, 0, libe2fs_sys::SEEK_SET as i32)
+                    .map_err(wrap_report)?;
                 let mut buf = vec![0; inode.size() as usize];
                 fs.read_file(&file, &mut buf).map_err(wrap_report)?;
 
@@ -290,6 +293,7 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
             Ok(mut inode) => {
                 // We only want to write the lower bits of perm.0 to inode.1.i_mode
                 let mut mode = inode.mode();
+                debug!("fs: set mode {mode:X}");
                 mode &= !0o777;
                 mode |= perm.0 & 0o777;
                 inode.1.i_mode = mode;
@@ -656,16 +660,16 @@ impl<'a> FloppyOpenOptions<'a, ExtFacadeFloppyDisk> for ExtFacadeOpenOptions {
                 ExtFacadeFile {
                     facade,
                     file,
-                    seek_position: std::io::SeekFrom::Start(0),
+                    cursor: 0,
                 }
             }
             Err(err) => {
                 if self.create {
-                    let file = fs.touch(path).map_err(wrap_report)?;
+                    let file = fs.touch(path, 0o644).map_err(wrap_report)?;
                     ExtFacadeFile {
                         facade,
                         file,
-                        seek_position: std::io::SeekFrom::Start(0),
+                        cursor: 0,
                     }
                 } else {
                     return Err(wrap_report(err));
@@ -681,7 +685,7 @@ impl<'a> FloppyOpenOptions<'a, ExtFacadeFloppyDisk> for ExtFacadeOpenOptions {
 pub struct ExtFacadeFile<'a> {
     facade: &'a ExtFacadeFloppyDisk,
     file: ExtFile,
-    seek_position: std::io::SeekFrom,
+    cursor: u64,
 }
 unsafe impl Send for ExtFacadeFile<'_> {}
 unsafe impl Sync for ExtFacadeFile<'_> {}
@@ -723,6 +727,7 @@ impl<'a> FloppyFile<'a, ExtFacadeFloppyDisk> for ExtFacadeFile<'a> {
     ) -> Result<()> {
         let fs = self.facade.fs.write().await;
         let mut inode = fs.get_inode(&self.file).map_err(wrap_report)?;
+        debug!("file: set mode {:X}", perm.0);
         inode.1.i_mode = (inode.1.i_mode & 0o70000) | perm.0;
         fs.write_inode(&mut inode).map_err(wrap_report)?;
         Ok(())
@@ -760,7 +765,31 @@ impl AsyncRead for ExtFacadeFile<'_> {
 impl AsyncSeek for ExtFacadeFile<'_> {
     fn start_seek(self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
         let mut this = self.get_mut();
-        this.seek_position = position;
+        let (direction, e2fs_position) = match position {
+            std::io::SeekFrom::Start(pos) => (libe2fs_sys::SEEK_SET, pos as i64),
+            std::io::SeekFrom::End(pos) => (libe2fs_sys::SEEK_END, pos),
+            std::io::SeekFrom::Current(pos) => (libe2fs_sys::SEEK_CUR, pos),
+        };
+        run_here(async {
+            let fs = this.facade.fs.read().await;
+            fs.seek(
+                &this.file,
+                e2fs_position.try_into().unwrap(),
+                direction.try_into().unwrap(),
+            )
+            .unwrap()
+        });
+        match direction {
+            libe2fs_sys::SEEK_SET => this.cursor = e2fs_position as u64,
+            libe2fs_sys::SEEK_END => {
+                let fs = run_here(async { this.facade.fs.read().await });
+                let inode = fs.get_inode(&this.file).map_err(wrap_report)?;
+                this.cursor = inode.size() + e2fs_position as u64;
+            }
+            libe2fs_sys::SEEK_CUR => this.cursor += e2fs_position as u64,
+            _ => unreachable!(),
+        }
+
         Ok(())
     }
 
@@ -768,39 +797,64 @@ impl AsyncSeek for ExtFacadeFile<'_> {
         self: Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<u64>> {
-        let position = match self.seek_position {
-            std::io::SeekFrom::Start(pos) => pos as i64,
-            std::io::SeekFrom::End(pos) => run_here(async {
-                let fs = self.facade.fs.read().await;
-                let inode = fs.get_inode(&self.file).unwrap();
-                inode.1.i_size as i64 + pos
-            }),
-            std::io::SeekFrom::Current(pos) => run_here(async {
-                let fs = self.facade.fs.read().await;
-                let inode = fs.get_inode(&self.file).unwrap();
-                inode.1.i_size as i64 + pos
-            }),
-        };
-
-        Poll::Ready(Ok(position as u64))
+        Poll::Ready(Ok(self.cursor))
     }
 }
 
 impl AsyncWrite for ExtFacadeFile<'_> {
     fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+        let this = self.get_mut();
         let res = run_here(async {
-            let fs = self.facade.fs.write().await;
-            fs.write_file(&self.file, buf).map_err(wrap_report)
+            let fs: tokio::sync::RwLockWriteGuard<super::ExtFilesystem> =
+                this.facade.fs.write().await;
+            debug!(
+                "writing ~{} bytes to file at offset {}",
+                buf.len(),
+                this.cursor
+            );
+            let out = fs.write_file(&this.file, buf).map_err(wrap_report);
+
+            // get current position from this.seek_position
+            debug!("effective current position: {}", this.cursor);
+
+            if let Ok(ref written) = out {
+                let written = *written as u64;
+                debug!("wrote {} bytes", written);
+                // dbg!(unsafe { *(this.file.0 as *mut libe2fs_sys::real_ext2_file) }.pos);
+                // fs.seek(&this.file, written, libe2fs_sys::SEEK_CUR as i32)
+                //     .unwrap();
+                // dbg!(unsafe { *(this.file.0 as *mut libe2fs_sys::real_ext2_file) }.pos);
+                // debug!(
+                //     "moving cursor from {} to {}",
+                //     this.cursor,
+                //     this.cursor + written
+                // );
+                this.cursor += written;
+            }
+            fs.flush_file(&this.file).unwrap();
+
+            out
         });
+
         Poll::Ready(res)
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
-        Poll::Ready(Ok(()))
+        debug!("flushing file!");
+        let this = self.get_mut();
+        let out = run_here(async {
+            this.facade
+                .fs
+                .write()
+                .await
+                .flush_file(&this.file)
+                .map_err(wrap_report)
+        });
+        Poll::Ready(out)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        self.poll_flush(cx)
     }
 }
 
@@ -886,7 +940,7 @@ mod tests {
     use eyre::Result;
 
     #[tokio::test]
-    async fn test() -> Result<()> {
+    async fn test_async_write_basic_copy() -> Result<()> {
         let img = TempImage::new("./fixtures/empty.ext4")?;
 
         let facade = ExtFacadeFloppyDisk::new(img.path_view())?;
@@ -901,6 +955,54 @@ mod tests {
             .await?;
 
         tokio::io::copy(&mut data.as_slice(), &mut file).await?;
+
+        let out = facade.read_to_string("/asdf").await?;
+        assert_eq!(data, out.as_bytes().to_vec());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_async_write_large_copy() -> Result<()> {
+        {
+            let img = TempImage::new("./fixtures/empty.ext4")?;
+
+            let facade = ExtFacadeFloppyDisk::new(img.path_view())?;
+
+            let data = [69u8; 69_420]; // haha I'm immature
+
+            let mut file = ExtFacadeOpenOptions::new()
+                .create(true)
+                .create_new(true)
+                .write(true)
+                .open(&facade, "/asdf")
+                .await?;
+
+            tokio::io::copy(&mut data.as_slice(), &mut file).await?;
+
+            let out = facade.read("/asdf").await?;
+            assert_eq!(data.len(), out.len());
+        }
+
+        {
+            let img = TempImage::new("./fixtures/empty.ext4")?;
+
+            let facade = ExtFacadeFloppyDisk::new(img.path_view())?;
+
+            let data = [69u8; 8_193]; // haha I'm immature
+
+            let mut file = ExtFacadeOpenOptions::new()
+                .create(true)
+                .create_new(true)
+                .write(true)
+                .open(&facade, "/asdf")
+                .await?;
+
+            tokio::io::copy(&mut data.as_slice(), &mut file).await?;
+
+            let out = facade.read("/asdf").await?;
+            assert_eq!(data.len(), out.len());
+        }
 
         Ok(())
     }

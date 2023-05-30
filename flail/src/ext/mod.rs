@@ -620,6 +620,7 @@ impl ExtFilesystem {
     }
 
     pub fn read_file(&self, file: &ExtFile, buf: &mut [u8]) -> Result<usize> {
+        debug!("reading up to {} bytes from {file:?}", buf.len());
         let mut got = MaybeUninit::uninit();
         let err = unsafe {
             libe2fs_sys::ext2fs_file_read(
@@ -630,8 +631,9 @@ impl ExtFilesystem {
             )
         };
         let bytes_read = unsafe { got.assume_init() };
+        debug!("read {bytes_read} bytes");
         if bytes_read != buf.len() as u32 {
-            debug!("read {} bytes, expected {}", bytes_read, buf.len());
+            warn!("read {} bytes, expected {}", bytes_read, buf.len());
         }
         if err == 0 {
             Ok(bytes_read as usize)
@@ -643,10 +645,10 @@ impl ExtFilesystem {
     pub fn write_file(&self, file: &ExtFile, buf: &[u8]) -> Result<usize> {
         let mut written = MaybeUninit::uninit();
         debug!("attempting to write {} bytes to {file:?}", buf.len());
-        let file = file.0 as *mut libe2fs_sys::real_ext2_file;
+        let ext_file = file.0 as *mut libe2fs_sys::real_ext2_file;
         let err = unsafe {
             libe2fs_sys::ext2fs_file_write(
-                file as *mut libe2fs_sys::ext2_file,
+                ext_file as *mut libe2fs_sys::ext2_file,
                 buf.as_ptr() as *const ::std::ffi::c_void,
                 buf.len() as u32,
                 written.as_mut_ptr(),
@@ -657,13 +659,15 @@ impl ExtFilesystem {
             return report(err);
         }
 
+        let written = unsafe { written.assume_init() };
+
         // update the true size of the inode
         unsafe {
-            let mut inode = self.read_inode((*file).ino)?;
-            inode.1.i_size = buf.len() as u32;
+            let mut inode = self.read_inode((*ext_file).ino)?;
+            debug!("final inode size: {}", inode.1.i_size);
             let err = libe2fs_sys::ext2fs_write_inode(
                 self.0.read().unwrap().as_mut().unwrap(),
-                (*file).ino,
+                (*ext_file).ino,
                 &mut inode.1,
             );
 
@@ -672,11 +676,13 @@ impl ExtFilesystem {
             }
         }
 
-        let err = unsafe { libe2fs_sys::ext2fs_file_flush(file as *mut libe2fs_sys::ext2_file) };
+        let err =
+            unsafe { libe2fs_sys::ext2fs_file_flush(ext_file as *mut libe2fs_sys::ext2_file) };
         if err == 0 {
             self.flush()?;
+            // self.seek(file, written as u64, libe2fs_sys::SEEK_CUR as i32)?;
             debug!("write succeeded");
-            Ok(unsafe { written.assume_init() } as usize)
+            Ok(written as usize)
         } else {
             report(err)
         }
@@ -869,15 +875,25 @@ impl ExtFilesystem {
             "mkdir {}/{name}",
             parent.display().to_string().trim_end_matches('/')
         );
-        let name = CString::new(name)?.as_bytes_with_nul().as_ptr();
+        let name = CString::new(name)?;
         let parent_inode = self.find_inode(&parent)?;
-        let fs = self.0.write().unwrap();
+        debug!("parent_inode: {}", parent_inode.0);
+        debug!("creating: {:?}", name);
+
         let err = unsafe {
+            let fs = self.0.write().unwrap();
             // pass 0 to automatically allocate new inode
             // http://fs.csl.utoronto.ca/~sunk/libext2fs.html#Creating-and-expanding-directories
-            libe2fs_sys::ext2fs_mkdir(*fs, parent_inode.0, 0, name as *mut _)
+            libe2fs_sys::ext2fs_mkdir(
+                *fs,
+                parent_inode.0,
+                0,
+                name.as_bytes_with_nul().as_ptr() as *mut _,
+            )
         };
         if err == 0 {
+            self.flush()?;
+            debug!("mkdir: success");
             Ok(())
         } else {
             report(err)
@@ -931,11 +947,12 @@ impl ExtFilesystem {
         if err == 0 {
             Ok(())
         } else {
+            dbg!(err);
             report(err)
         }
     }
 
-    pub fn touch<P: Into<PathBuf>>(&self, path: P) -> Result<ExtFile> {
+    pub fn touch<P: Into<PathBuf>>(&self, path: P, mode: u16) -> Result<ExtFile> {
         let fs = *self.0.write().unwrap();
         let path = path.into();
 
@@ -949,8 +966,8 @@ impl ExtFilesystem {
                 inum.as_mut_ptr(),
             );
             if err != 0 {
-                debug!("could not find inum, allocating new inode");
-                self.new_inode(Self::ROOT_INODE, 0)?.0
+                debug!("touch: could not find inum, allocating new inode");
+                self.new_inode(Self::ROOT_INODE, mode)?.0
             } else {
                 inum.assume_init()
             }
@@ -1023,7 +1040,7 @@ impl ExtFilesystem {
                 inum.as_mut_ptr(),
             );
             if err != 0 {
-                debug!("could not find inum, allocating new inode");
+                debug!("write_to_file: could not find inum, allocating new inode");
                 self.new_inode(Self::ROOT_INODE, 0)?.0
             } else {
                 inum.assume_init()
@@ -1276,6 +1293,19 @@ impl ExtFilesystem {
         };
 
         Ok(())
+    }
+
+    pub fn seek(&self, file: &ExtFile, offset: u64, direction: i32) -> Result<()> {
+        debug!("seeking to {offset}");
+        let err = unsafe {
+            libe2fs_sys::ext2fs_file_llseek(file.0, offset, direction, std::ptr::null_mut())
+        };
+        if err == 0 {
+            debug!("seek ok");
+            Ok(())
+        } else {
+            report(err)
+        }
     }
 
     // #[cfg(target_os = "windows")]
