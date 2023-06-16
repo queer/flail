@@ -7,10 +7,8 @@ use std::path::{Path, PathBuf};
 fn main() {
     // Build our specific libe2fs version!
     let pwd = std::env::current_dir().unwrap();
-    let mut sys_dir = find_flail_dir(&pwd);
-    sys_dir.push("libe2fs-sys");
+    let sys_dir = find_self_proj_dir(&pwd);
     std::env::set_current_dir(sys_dir).unwrap();
-    // /flail/libe2fs-sys
     let project_root = std::env::current_dir().unwrap();
     let res = std::process::Command::new("bash")
         .arg(format!("{}/build-e2fs.sh", project_root.display()))
@@ -31,8 +29,6 @@ fn main() {
 
     // Tell cargo to look for shared libraries in the specified directory
     // println!("cargo:rustc-link-search=/usr/include");
-    // /flail
-    let project_root = project_root.parent().unwrap();
     println!(
         "cargo:rustc-link-search={}/e2fsprogs/build/lib",
         project_root.display()
@@ -70,20 +66,21 @@ fn main() {
         .expect("Couldn't write bindings!");
 }
 
-fn find_flail_dir(pwd: &Path) -> PathBuf {
-    if let Some("flail") = pwd.file_name().and_then(|s| s.to_str()) {
-        if let Some("flail") = pwd
-            .parent()
-            .and_then(|s| s.file_name())
-            .and_then(|s| s.to_str())
-        {
-            return pwd.parent().unwrap().to_path_buf();
-        }
+fn find_self_proj_dir(pwd: &Path) -> PathBuf {
+    eprintln!("searching: {}", pwd.display());
+    if pwd.file_name().is_some()
+        && pwd
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("libe2fs-sys")
+    {
         return pwd.to_path_buf();
     }
 
     if let Some(parent) = pwd.parent() {
-        find_flail_dir(parent)
+        find_self_proj_dir(parent)
     } else {
         panic!("Could not find libe2fs-sys directory from pwd");
     }
