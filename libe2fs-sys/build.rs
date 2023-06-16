@@ -43,10 +43,7 @@ fn main() {
 
     // Tell cargo to look for shared libraries in the specified directory
     println!("cargo:rustc-link-search=/usr/include");
-    println!(
-        "cargo:rustc-link-search={}/e2fsprogs/build/lib",
-        project_root.display()
-    );
+    println!("cargo:rustc-link-search=./_build/e2fsprogs/build/lib",);
 
     // Tell cargo to tell rustc to link the system bzip2
     // shared library.
