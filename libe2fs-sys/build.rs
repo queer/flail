@@ -8,6 +8,7 @@ fn main() {
     // Build our specific libe2fs version!
     let pwd: PathBuf = std::env::current_dir().unwrap();
     let project_root = find_self_proj_dir(&pwd);
+    let out_dir = std::env::var("OUT_DIR").unwrap();
 
     // Check for pwd/e2fsprogs
     if !Path::new(&format!("{}/_build/e2fsprogs", pwd.display())).exists() {
@@ -16,7 +17,7 @@ fn main() {
         cmd.arg("-r")
             .arg(format!("{}/e2fsprogs", project_root.display()));
         cmd.arg(format!("{}/build-e2fs.sh", project_root.display()));
-        cmd.arg("./_build");
+        cmd.arg(format!("{}/_build", out_dir));
         let res = cmd.output().unwrap();
 
         if !res.status.success() {
@@ -43,7 +44,10 @@ fn main() {
 
     // Tell cargo to look for shared libraries in the specified directory
     println!("cargo:rustc-link-search=/usr/include");
-    println!("cargo:rustc-link-search=./_build/e2fsprogs/build/lib",);
+    println!(
+        "cargo:rustc-link-search={}/_build/e2fsprogs/build/lib",
+        out_dir
+    );
 
     // Tell cargo to tell rustc to link the system bzip2
     // shared library.
