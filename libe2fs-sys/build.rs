@@ -10,7 +10,12 @@ fn main() {
     let project_root = find_self_proj_dir(&pwd);
     let out_dir = std::env::var("OUT_DIR").unwrap();
     eprintln!("mkdir _build");
-    std::fs::remove_dir_all(format!("{out_dir}/_build"));
+    // We don't want to raise just in case it doesn't already exist. This helps
+    // ensure clean builds.
+    #[allow(unused_must_use)]
+    {
+        std::fs::remove_dir_all(format!("{out_dir}/_build"));
+    }
     std::fs::create_dir_all(format!("{out_dir}/_build")).unwrap();
 
     eprintln!("copy e2fsprogs");
