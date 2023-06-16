@@ -4,12 +4,22 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // Build our specific libe2fs version!
+    std::process::Command::new("bash")
+        .arg("./build-e2fs.sh")
+        .spawn()
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+
     // Tell cargo to look for shared libraries in the specified directory
-    println!("cargo:rustc-link-search=/usr/include");
+    // println!("cargo:rustc-link-search=/usr/include");
+    println!("cargo:rustc-link-search=./e2fsprogs/build/lib");
 
     // Tell cargo to tell rustc to link the system bzip2
     // shared library.
-    println!("cargo:rustc-link-lib=ext2fs");
+    println!("cargo:rustc-link-lib=static:+verbatim=libext2fs.a");
+    println!("cargo:rustc-link-lib=static:+verbatim=libcom_err.a");
 
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=wrapper.h");
