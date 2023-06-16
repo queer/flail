@@ -8,6 +8,12 @@ rm -rf ./build/
 # git reset --hard HEAD
 # set up build dir
 mkdir -pv build
+# subs
+# yes, two passes are necessary. the first pass generates the subs files, and
+# the second ./configure actually configures for build.
+./configure
+make subs
+# build!
 cd build
 # fix includes for flat includes
 # TODO: file bug against e2fsprogs
