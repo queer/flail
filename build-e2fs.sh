@@ -3,7 +3,7 @@
 set -eoux pipefail
 
 cd e2fsprogs
-mkdir -v build
+mkdir -pv build
 cd build
 ../configure
 env LDFLAGS="-Wl,static" make
