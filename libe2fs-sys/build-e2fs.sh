@@ -6,4 +6,4 @@ cd e2fsprogs
 mkdir -pv build
 cd build
 ../configure
-env LDFLAGS="-Wl,static" make libs
+env CFLAGS="-DEXT2_FLAT_INCLUDES" LDFLAGS="-Wl,static" make libs
