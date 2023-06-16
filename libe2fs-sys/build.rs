@@ -1,20 +1,37 @@
 extern crate bindgen;
 
+use core::panic;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     // Build our specific libe2fs version!
-    std::process::Command::new("bash")
-        .arg("./build-e2fs.sh")
+    let pwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(find_libe2fs_sys_dir(&pwd)).unwrap();
+    let project_root = std::env::current_dir().unwrap();
+    let res = std::process::Command::new("bash")
+        .arg(format!("{}/build-e2fs.sh", project_root.display()))
         .spawn()
         .unwrap()
         .wait_with_output()
         .unwrap();
+    // chdir back
+    std::env::set_current_dir(pwd).unwrap();
+
+    if !res.status.success() {
+        panic!(
+            "Failed to build libe2fs:\n--------\n{}\n--------\n{}\n--------\n",
+            String::from_utf8(res.stdout).unwrap(),
+            String::from_utf8(res.stderr).unwrap()
+        );
+    }
 
     // Tell cargo to look for shared libraries in the specified directory
     // println!("cargo:rustc-link-search=/usr/include");
-    println!("cargo:rustc-link-search=./e2fsprogs/build/lib");
+    println!(
+        "cargo:rustc-link-search={}/e2fsprogs/build/lib",
+        project_root.display()
+    );
 
     // Tell cargo to tell rustc to link the system bzip2
     // shared library.
@@ -46,4 +63,16 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+}
+
+fn find_libe2fs_sys_dir(pwd: &Path) -> PathBuf {
+    if pwd.file_name().unwrap().to_string_lossy() == ("libe2fs-sys") {
+        return pwd.to_path_buf().parent().unwrap().to_path_buf();
+    }
+
+    if let Some(parent) = pwd.parent() {
+        find_libe2fs_sys_dir(parent)
+    } else {
+        panic!("Could not find libe2fs-sys directory from pwd");
+    }
 }
