@@ -6,22 +6,36 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     // Build our specific libe2fs version!
-    let pwd = std::env::current_dir().unwrap();
-    let sys_dir = find_self_proj_dir(&pwd);
-    std::env::set_current_dir(sys_dir).unwrap();
-    let project_root = std::env::current_dir().unwrap();
-    let res = std::process::Command::new("bash")
-        .arg(format!("{}/build-e2fs.sh", project_root.display()))
-        .spawn()
-        .unwrap()
-        .wait_with_output()
-        .unwrap();
-    // chdir back
-    std::env::set_current_dir(pwd).unwrap();
+    let pwd: PathBuf = std::env::current_dir().unwrap();
+    let project_root = find_self_proj_dir(&pwd);
+
+    // Check for pwd/e2fsprogs
+    if !Path::new(&format!("{}/_build/e2fsprogs", pwd.display())).exists() {
+        std::fs::create_dir_all("./_build").unwrap();
+        let mut cmd = std::process::Command::new("cp");
+        cmd.arg("-r")
+            .arg(format!("{}/e2fsprogs", project_root.display()));
+        cmd.arg(format!("{}/build-e2fs.sh", project_root.display()));
+        cmd.arg("./_build");
+        let res = cmd.output().unwrap();
+
+        if !res.status.success() {
+            panic!(
+                "Failed to copy e2fsprogs:\n--------\n{}\n--------\n{}\n--------\n",
+                String::from_utf8(res.stdout).unwrap(),
+                String::from_utf8(res.stderr).unwrap()
+            );
+        }
+    }
+
+    // run ./build-e2fs.sh!
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg("build-e2fs.sh");
+    let res = cmd.output().unwrap();
 
     if !res.status.success() {
         panic!(
-            "Failed to build libe2fs:\n--------\n{}\n--------\n{}\n--------\n",
+            "Failed to build e2fsprogs:\n--------\n{}\n--------\n{}\n--------\n",
             String::from_utf8(res.stdout).unwrap(),
             String::from_utf8(res.stderr).unwrap()
         );

@@ -2,7 +2,7 @@
 
 set -eoux pipefail
 
-cd e2fsprogs
+cd _build/e2fsprogs
 mkdir -pv build
 cd build
 ../configure
