@@ -9,27 +9,28 @@ fn main() {
     let pwd: PathBuf = std::env::current_dir().unwrap();
     let project_root = find_self_proj_dir(&pwd);
     let out_dir = std::env::var("OUT_DIR").unwrap();
+    eprintln!("mkdir _build");
+    std::fs::remove_dir_all(format!("{out_dir}/_build"));
+    std::fs::create_dir_all(format!("{out_dir}/_build")).unwrap();
 
-    // Check for pwd/e2fsprogs
-    if !Path::new(&format!("{}/_build/e2fsprogs", pwd.display())).exists() {
-        std::fs::create_dir_all(format!("{out_dir}/_build")).unwrap();
-        let mut cmd = std::process::Command::new("cp");
-        cmd.arg("-r")
-            .arg(format!("{}/e2fsprogs", project_root.display()));
-        cmd.arg(format!("{}/build-e2fs.sh", project_root.display()));
-        cmd.arg(format!("{out_dir}/_build"));
-        let res = cmd.output().unwrap();
+    eprintln!("copy e2fsprogs");
+    let mut cmd = std::process::Command::new("cp");
+    cmd.arg("-r")
+        .arg(format!("{}/e2fsprogs", project_root.display()));
+    cmd.arg(format!("{}/build-e2fs.sh", project_root.display()));
+    cmd.arg(format!("{out_dir}/_build"));
+    let res = cmd.output().unwrap();
 
-        if !res.status.success() {
-            panic!(
-                "Failed to copy e2fsprogs:\n--------\n{}\n--------\n{}\n--------\n",
-                String::from_utf8(res.stdout).unwrap(),
-                String::from_utf8(res.stderr).unwrap()
-            );
-        }
+    if !res.status.success() {
+        panic!(
+            "Failed to copy e2fsprogs:\n--------\n{}\n--------\n{}\n--------\n",
+            String::from_utf8(res.stdout).unwrap(),
+            String::from_utf8(res.stderr).unwrap()
+        );
     }
 
     // run ./build-e2fs.sh!
+    eprintln!("_build/build-e2fs.sh");
     std::env::set_current_dir(format!("{}/_build", &out_dir)).unwrap();
     let mut cmd = std::process::Command::new("bash");
     cmd.arg("build-e2fs.sh");

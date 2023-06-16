@@ -517,7 +517,7 @@ checksum = "2b00cc1c228a6782d0f076e7b232802e0c5689d41bb5df366f2a6b6621cfdfe1"
 
 [[package]]
 name = "libe2fs-sys"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "bindgen",
 ]
