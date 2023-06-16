@@ -10,6 +10,7 @@ fn main() {
     let mut sys_dir = find_flail_dir(&pwd);
     sys_dir.push("libe2fs-sys");
     std::env::set_current_dir(sys_dir).unwrap();
+    // /flail/libe2fs-sys
     let project_root = std::env::current_dir().unwrap();
     let res = std::process::Command::new("bash")
         .arg(format!("{}/build-e2fs.sh", project_root.display()))
@@ -30,6 +31,8 @@ fn main() {
 
     // Tell cargo to look for shared libraries in the specified directory
     // println!("cargo:rustc-link-search=/usr/include");
+    // /flail
+    let project_root = project_root.parent().unwrap();
     println!(
         "cargo:rustc-link-search={}/e2fsprogs/build/lib",
         project_root.display()
@@ -69,7 +72,7 @@ fn main() {
 
 fn find_flail_dir(pwd: &Path) -> PathBuf {
     if pwd.file_name().unwrap().to_string_lossy() == "flail" {
-        return pwd.to_path_buf().parent().unwrap().to_path_buf();
+        return pwd.to_path_buf();
     }
 
     if let Some(parent) = pwd.parent() {
