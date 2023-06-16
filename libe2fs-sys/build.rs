@@ -12,12 +12,12 @@ fn main() {
 
     // Check for pwd/e2fsprogs
     if !Path::new(&format!("{}/_build/e2fsprogs", pwd.display())).exists() {
-        std::fs::create_dir_all("./_build").unwrap();
+        std::fs::create_dir_all(format!("{out_dir}/_build")).unwrap();
         let mut cmd = std::process::Command::new("cp");
         cmd.arg("-r")
             .arg(format!("{}/e2fsprogs", project_root.display()));
         cmd.arg(format!("{}/build-e2fs.sh", project_root.display()));
-        cmd.arg(format!("{}/_build", out_dir));
+        cmd.arg(format!("{out_dir}/_build"));
         let res = cmd.output().unwrap();
 
         if !res.status.success() {
@@ -30,9 +30,11 @@ fn main() {
     }
 
     // run ./build-e2fs.sh!
+    std::env::set_current_dir(format!("{}/_build", &out_dir)).unwrap();
     let mut cmd = std::process::Command::new("bash");
     cmd.arg("build-e2fs.sh");
     let res = cmd.output().unwrap();
+    std::env::set_current_dir(&pwd).unwrap();
 
     if !res.status.success() {
         panic!(
@@ -44,10 +46,7 @@ fn main() {
 
     // Tell cargo to look for shared libraries in the specified directory
     println!("cargo:rustc-link-search=/usr/include");
-    println!(
-        "cargo:rustc-link-search={}/_build/e2fsprogs/build/lib",
-        out_dir
-    );
+    println!("cargo:rustc-link-search={out_dir}/_build/e2fsprogs/build/lib");
 
     // Tell cargo to tell rustc to link the system bzip2
     // shared library.
