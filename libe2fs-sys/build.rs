@@ -71,7 +71,14 @@ fn main() {
 }
 
 fn find_flail_dir(pwd: &Path) -> PathBuf {
-    if pwd.file_name().unwrap().to_string_lossy() == "flail" {
+    if let Some("flail") = pwd.file_name().and_then(|s| s.to_str()) {
+        if let Some("flail") = pwd
+            .parent()
+            .and_then(|s| s.file_name())
+            .and_then(|s| s.to_str())
+        {
+            return pwd.parent().unwrap().to_path_buf();
+        }
         return pwd.to_path_buf();
     }
 

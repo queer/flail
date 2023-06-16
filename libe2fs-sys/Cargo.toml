@@ -1,7 +1,7 @@
 [package]
 name = "libe2fs-sys"
 description = "Rust bindings for libe2fs"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 links = "ext2fs"
 license = "Apache-2.0"
