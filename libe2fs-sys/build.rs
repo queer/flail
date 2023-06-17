@@ -51,20 +51,10 @@ fn main() {
     }
 
     eprintln!("copy headers");
-    let mut cmd = std::process::Command::new("cp");
-    cmd.arg(format!(
-        "{out_dir}/_build/e2fsprogs/lib/ext2fs/ext2_types.h"
-    ));
-    cmd.arg("./e2fsprogs/lib/ext2fs/ext2_types.h");
-    let res = cmd.output().unwrap();
-
-    if !res.status.success() {
-        panic!(
-            "Failed to copy headers:\n--------\n{}\n--------\n{}\n--------\n",
-            String::from_utf8(res.stdout).unwrap(),
-            String::from_utf8(res.stderr).unwrap()
-        );
-    }
+    let prj = project_root.display().to_string();
+    copy_headers(&out_dir, &prj, "ext2_types.h");
+    copy_headers(&out_dir, &prj, "ext2fs.h");
+    copy_headers(&out_dir, &prj, "ext2_err.h");
 
     // Tell cargo to look for shared libraries in the specified directory
     println!("cargo:rustc-link-search={out_dir}/_build/e2fsprogs/build/lib");
@@ -100,6 +90,22 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+}
+
+fn copy_headers(out_dir: &str, project_dir: &str, hdr: &str) {
+    eprintln!("copy {hdr} from {out_dir} to {project_dir}");
+    let mut cmd = std::process::Command::new("cp");
+    cmd.arg(format!("{out_dir}/_build/e2fsprogs/lib/ext2fs/{hdr}"));
+    cmd.arg(format!("{project_dir}/e2fsprogs/lib/ext2fs/{hdr}"));
+    let res = cmd.output().unwrap();
+
+    if !res.status.success() {
+        panic!(
+            "Failed to copy headers:\n--------\n{}\n--------\n{}\n--------\n",
+            String::from_utf8(res.stdout).unwrap(),
+            String::from_utf8(res.stderr).unwrap()
+        );
+    }
 }
 
 fn find_self_proj_dir(pwd: &Path) -> PathBuf {
