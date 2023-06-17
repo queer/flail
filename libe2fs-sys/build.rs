@@ -92,11 +92,28 @@ fn main() {
         .expect("Couldn't write bindings!");
 }
 
+fn chmod_plus_w(target: &str) {
+    let mut cmd = std::process::Command::new("chmod");
+    cmd.arg("+w").arg(target);
+    let res = cmd.output().unwrap();
+
+    if !res.status.success() {
+        panic!(
+            "Failed to chmod +w {}:\n--------\n{}\n--------\n{}\n--------\n",
+            target,
+            String::from_utf8(res.stdout).unwrap(),
+            String::from_utf8(res.stderr).unwrap()
+        );
+    }
+}
+
 fn copy_headers(out_dir: &str, project_dir: &str, hdr: &str) {
     eprintln!("copy {hdr} from {out_dir} to {project_dir}");
+    let dest = format!("{project_dir}/e2fsprogs/lib/ext2fs/{hdr}");
+    chmod_plus_w(&dest);
     let mut cmd = std::process::Command::new("cp");
     cmd.arg(format!("{out_dir}/_build/e2fsprogs/lib/ext2fs/{hdr}"));
-    cmd.arg(format!("{project_dir}/e2fsprogs/lib/ext2fs/{hdr}"));
+    cmd.arg(dest);
     let res = cmd.output().unwrap();
 
     if !res.status.success() {
