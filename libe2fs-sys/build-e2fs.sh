@@ -13,6 +13,7 @@ mkdir -pv build
 # the second ./configure actually configures for build.
 ./configure
 make subs
+make lib/ext2fs/ext2_types.h
 # build!
 cd build
 # fix includes for flat includes
