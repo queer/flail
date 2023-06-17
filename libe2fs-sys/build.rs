@@ -93,6 +93,10 @@ fn main() {
 }
 
 fn chmod_plus_w(target: &str) {
+    if !PathBuf::from(target).exists() {
+        eprintln!("{target} does not exist");
+        return;
+    }
     let mut cmd = std::process::Command::new("chmod");
     cmd.arg("+w").arg(target);
     let res = cmd.output().unwrap();
