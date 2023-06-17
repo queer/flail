@@ -68,6 +68,10 @@ fn main() {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=wrapper.h");
 
+    if !exists("./e2fsprogs/lib/ext2fs/ext2_types.h") {
+        panic!("ext2_types.h does not exist!?");
+    }
+
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
     // the resulting bindings.
@@ -92,9 +96,13 @@ fn main() {
         .expect("Couldn't write bindings!");
 }
 
+fn exists(path: &str) -> bool {
+    PathBuf::from(path).exists()
+}
+
 fn chmod_plus_w(target: &str) {
-    if !PathBuf::from(target).exists() {
-        eprintln!("{target} does not exist");
+    if !exists(target) {
+        eprintln!("chmod_plus_w: {target} does not exist");
         return;
     }
     let mut cmd = std::process::Command::new("chmod");
