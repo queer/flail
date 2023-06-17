@@ -50,6 +50,22 @@ fn main() {
         );
     }
 
+    eprintln!("copy headers");
+    let mut cmd = std::process::Command::new("cp");
+    cmd.arg(format!(
+        "{out_dir}/_build/e2fsprogs/lib/ext2fs/ext2_types.h"
+    ));
+    cmd.arg("./e2fsprogs/lib/ext2fs/ext2_types.h");
+    let res = cmd.output().unwrap();
+
+    if !res.status.success() {
+        panic!(
+            "Failed to copy headers:\n--------\n{}\n--------\n{}\n--------\n",
+            String::from_utf8(res.stdout).unwrap(),
+            String::from_utf8(res.stderr).unwrap()
+        );
+    }
+
     // Tell cargo to look for shared libraries in the specified directory
     println!("cargo:rustc-link-search={out_dir}/_build/e2fsprogs/build/lib");
     println!("cargo:rustc-link-search=/usr/include");
