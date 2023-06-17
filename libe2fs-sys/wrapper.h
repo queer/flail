@@ -1,3 +1,4 @@
+#define EXT2_FLAT_INCLUDES
 #include "./e2fsprogs/lib/ext2fs/ext2fs.h"
 
 struct ext2fs_struct_generic_bitmap_32
