@@ -52,9 +52,13 @@ fn main() {
 
     eprintln!("copy headers");
     let prj = project_root.display().to_string();
-    copy_headers(&out_dir, &prj, "ext2_types.h");
-    copy_headers(&out_dir, &prj, "ext2fs.h");
-    copy_headers(&out_dir, &prj, "ext2_err.h");
+    copy_source(&out_dir, &prj, "ext2_types.h");
+    copy_source(&out_dir, &prj, "ext2_err.h");
+    copy_source(&out_dir, &prj, "ext2_fs.h");
+    copy_source(&out_dir, &prj, "ext2_io.h");
+    copy_source(&out_dir, &prj, "ext2fs.h");
+    copy_source(&out_dir, &prj, "crc16.c");
+    copy_source(&out_dir, &prj, "dosio.c");
 
     // Tell cargo to look for shared libraries in the specified directory
     println!("cargo:rustc-link-search={out_dir}/_build/e2fsprogs/build/lib");
@@ -119,7 +123,7 @@ fn chmod_plus_w(target: &str) {
     }
 }
 
-fn copy_headers(out_dir: &str, project_dir: &str, hdr: &str) {
+fn copy_source(out_dir: &str, project_dir: &str, hdr: &str) {
     eprintln!("copy {hdr} from {out_dir} to {project_dir}");
     let dest = format!("{project_dir}/e2fsprogs/lib/ext2fs/{hdr}");
     chmod_plus_w(&dest);
