@@ -135,7 +135,7 @@ impl<'a> FloppyDisk<'a> for ExtFacadeFloppyDisk {
         parent_paths.reverse();
 
         // TODO: This might break somehow, right?
-        let mut path_to = parent.unwrap().to_path_buf();
+        let mut path_to = parent.unwrap_or(Path::new("/")).to_path_buf();
         for path in parent_paths {
             fs.mkdir(
                 &path_to,
