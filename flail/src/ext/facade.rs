@@ -40,7 +40,12 @@ impl ExtFacadeFloppyDisk {
         })
     }
 
-    pub fn create<P: Into<PathBuf> + std::fmt::Debug>(path: P, size_bytes: u64) -> Result<Self> {
+    pub fn create<P: Into<PathBuf> + std::fmt::Debug>(
+        path: P,
+        mut size_bytes: u64,
+    ) -> Result<Self> {
+        // Block alignment
+        size_bytes = size_bytes + (1024 - (size_bytes % 1024));
         Ok(Self {
             fs: Arc::new(RwLock::new(
                 super::ExtFilesystem::create(path, size_bytes).map_err(wrap_report)?,
