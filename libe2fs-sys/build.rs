@@ -68,9 +68,12 @@ fn main() {
         // The input header we would like to generate
         // bindings for.
         .header("wrapper.h")
-        // We need some types from our normal directory, and some in our build directory.
+        // We need some head from our source directory, and
+        // some generated within our build directory.
         .clang_arg(format!("-I{}/_build/e2fsprogs/lib/ext2fs", &out_dir))
         .clang_arg(format!("-I{}/_build/e2fsprogs/build/lib/ext2fs", &out_dir))
+        // for <et/com_err.h>
+        .clang_arg(format!("-I{}/_build/e2fsprogs/lib", &out_dir))
         .derive_debug(true)
         .derive_copy(true)
         // Tell cargo to invalidate the built crate whenever any of the
