@@ -50,19 +50,8 @@ fn main() {
         );
     }
 
-    eprintln!("copy headers");
-    let prj = project_root.display().to_string();
-    copy_source(&out_dir, &prj, "ext2_types.h");
-    copy_source(&out_dir, &prj, "ext2_err.h");
-    copy_source(&out_dir, &prj, "ext2_fs.h");
-    copy_source(&out_dir, &prj, "ext2_io.h");
-    copy_source(&out_dir, &prj, "ext2fs.h");
-    copy_source(&out_dir, &prj, "crc16.c");
-    copy_source(&out_dir, &prj, "dosio.c");
-
-    // Tell cargo to look for shared libraries in the specified directory
+    // Tell cargo to look for libraries in the out directory
     println!("cargo:rustc-link-search={out_dir}/_build/e2fsprogs/build/lib");
-    println!("cargo:rustc-link-search=/usr/include");
 
     // Tell cargo to tell rustc to link the system bzip2
     // shared library.
@@ -72,10 +61,6 @@ fn main() {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=wrapper.h");
 
-    if !exists("./e2fsprogs/lib/ext2fs/ext2_types.h") {
-        panic!("ext2_types.h does not exist!?");
-    }
-
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
     // the resulting bindings.
@@ -83,6 +68,9 @@ fn main() {
         // The input header we would like to generate
         // bindings for.
         .header("wrapper.h")
+        // We need some types from our normal directory, and some in our build directory.
+        .clang_arg(format!("-I{}/_build/e2fsprogs/lib/ext2fs", &out_dir))
+        .clang_arg(format!("-I{}/_build/e2fsprogs/build/lib/ext2fs", &out_dir))
         .derive_debug(true)
         .derive_copy(true)
         // Tell cargo to invalidate the built crate whenever any of the
@@ -98,47 +86,6 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
-}
-
-fn exists(path: &str) -> bool {
-    PathBuf::from(path).exists()
-}
-
-fn chmod_plus_w(target: &str) {
-    if !exists(target) {
-        eprintln!("chmod_plus_w: {target} does not exist");
-        return;
-    }
-    let mut cmd = std::process::Command::new("chmod");
-    cmd.arg("+w").arg(target);
-    let res = cmd.output().unwrap();
-
-    if !res.status.success() {
-        panic!(
-            "Failed to chmod +w {}:\n--------\n{}\n--------\n{}\n--------\n",
-            target,
-            String::from_utf8(res.stdout).unwrap(),
-            String::from_utf8(res.stderr).unwrap()
-        );
-    }
-}
-
-fn copy_source(out_dir: &str, project_dir: &str, hdr: &str) {
-    eprintln!("copy {hdr} from {out_dir} to {project_dir}");
-    let dest = format!("{project_dir}/e2fsprogs/lib/ext2fs/{hdr}");
-    chmod_plus_w(&dest);
-    let mut cmd = std::process::Command::new("cp");
-    cmd.arg(format!("{out_dir}/_build/e2fsprogs/lib/ext2fs/{hdr}"));
-    cmd.arg(dest);
-    let res = cmd.output().unwrap();
-
-    if !res.status.success() {
-        panic!(
-            "Failed to copy headers:\n--------\n{}\n--------\n{}\n--------\n",
-            String::from_utf8(res.stdout).unwrap(),
-            String::from_utf8(res.stderr).unwrap()
-        );
-    }
 }
 
 fn find_self_proj_dir(pwd: &Path) -> PathBuf {
