@@ -7,18 +7,11 @@ cd e2fsprogs
 # clean up previous state. this is mostly for dev.
 rm -rf ./build/
 
+# git clean -fd
 # git reset --hard HEAD
+
 # set up build dir
 mkdir -pv build
-
-# subs
-# yes, two passes are necessary. the first pass generates the subs files, and
-# the second ./configure actually configures for build.
-env CC="musl-gcc" ./configure
-make subs
-make lib/ext2fs/ext2_types.h
-
-# build!
 cd build
 
 # fix includes for flat includes
@@ -33,6 +26,10 @@ sed -i -e 's|#include "com_err.h"|#include "../et/com_err.h"|g' ../lib/ext2fs/ex
 # configure! autotools! pain! :D
 env CC="musl-gcc" CFLAGS="-DEXT2_FLAT_INCLUDES=1" ../configure
 
+# generate subs and ext2 types header
+make subs -j
+make lib/ext2fs/ext2_types.h
+
 # patch makefile to only build libext2fs
 perl -i -pe 's/LIB_SUBDIRS=.*\n.*$/LIB_SUBDIRS=lib\/et \$\(EXT2FS_LIB_SUBDIR\) #/igs' Makefile
 
@@ -41,5 +38,4 @@ perl -i -pe 's/LIB_SUBDIRS=.*\n.*$/LIB_SUBDIRS=lib\/et \$\(EXT2FS_LIB_SUBDIR\) #
 cp ../util/subst* ./util/
 
 # do the meme!
-make subs
-env CC="musl-gcc" CFLAGS="-DEXT2_FLAT_INCLUDES=1" LDFLAGS="-Wl,static" make libs
+env CC="musl-gcc" CFLAGS="-DEXT2_FLAT_INCLUDES=1" LDFLAGS="-Wl,static" make -j libs
