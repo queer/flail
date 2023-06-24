@@ -26,16 +26,15 @@ sed -i -e 's|#include "com_err.h"|#include "../et/com_err.h"|g' ../lib/ext2fs/ex
 # configure! autotools! pain! :D
 env CC="musl-gcc" CFLAGS="-DEXT2_FLAT_INCLUDES=1" ../configure
 
+# subst doesn't get copied in, presumably because we're butchering the build
+# process. copy it in from below
+cp ../util/subst* ./util/
 # generate subs and ext2 types header
 make subs -j
 make lib/ext2fs/ext2_types.h
 
 # patch makefile to only build libext2fs
 perl -i -pe 's/LIB_SUBDIRS=.*\n.*$/LIB_SUBDIRS=lib\/et \$\(EXT2FS_LIB_SUBDIR\) #/igs' Makefile
-
-# subst doesn't get copied in, presumably because we're butchering the build
-# process. copy it in from below
-cp ../util/subst* ./util/
 
 # do the meme!
 env CC="musl-gcc" CFLAGS="-DEXT2_FLAT_INCLUDES=1" LDFLAGS="-Wl,static" make -j libs
