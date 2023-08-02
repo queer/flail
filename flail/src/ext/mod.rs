@@ -414,7 +414,13 @@ impl ExtFilesystem {
 
     pub fn iterate_dir<F, P: Into<PathBuf>>(&self, dir: P, mut f: F) -> Result<()>
     where
-        F: FnMut(*mut libe2fs_sys::ext2_dir_entry, i32, i32, &str, &[i8]) -> Result<i32>,
+        F: FnMut(
+            *mut libe2fs_sys::ext2_dir_entry,
+            i32,
+            i32,
+            &str,
+            &[::std::ffi::c_char],
+        ) -> Result<i32>,
     {
         let dir = dir.into();
         debug!("iterate dir at {dir:?}");
@@ -432,7 +438,7 @@ impl ExtFilesystem {
                 *fs,
                 inode.num(),
                 0,
-                &mut [0u8; 4_096] as *mut _ as *mut i8,
+                &mut [0u8; 4_096] as *mut _ as *mut ::std::ffi::c_char,
                 Some(iterator),
                 &mut f as *mut _ as *mut ::std::ffi::c_void,
             )
@@ -549,7 +555,7 @@ impl ExtFilesystem {
 
     pub fn get_pathname(&self, inode: u32) -> Result<String> {
         debug!("reading pathname for inode {}", inode);
-        let mut name = MaybeUninit::<&[i8]>::uninit();
+        let mut name = MaybeUninit::<&[::std::ffi::c_char]>::uninit();
         let err = unsafe {
             libe2fs_sys::ext2fs_get_pathname(
                 self.0.read().unwrap().as_mut().unwrap(),
@@ -1353,7 +1359,7 @@ pub type DirIteratorCallback = unsafe extern "C" fn(
     *mut libe2fs_sys::ext2_dir_entry,
     i32,
     i32,
-    *mut i8,
+    *mut ::std::ffi::c_char,
     *mut ::std::ffi::c_void,
 ) -> i32;
 
@@ -1361,11 +1367,17 @@ unsafe extern "C" fn dir_iterator_trampoline<F>(
     dir_entry: *mut libe2fs_sys::ext2_dir_entry,
     offset: i32,
     block_size: i32,
-    buf: *mut i8,
+    buf: *mut ::std::ffi::c_char,
     user_data: *mut ::std::ffi::c_void,
 ) -> i32
 where
-    F: FnMut(*mut libe2fs_sys::ext2_dir_entry, i32, i32, &str, &[i8]) -> Result<i32>,
+    F: FnMut(
+        *mut libe2fs_sys::ext2_dir_entry,
+        i32,
+        i32,
+        &str,
+        &[::std::ffi::c_char],
+    ) -> Result<i32>,
 {
     let name = CStr::from_ptr(unsafe { *dir_entry }.name.as_ptr())
         .to_str()
@@ -1380,7 +1392,13 @@ where
 
 fn get_dir_iterator_trampoline<F>(_closure: &F) -> DirIteratorCallback
 where
-    F: FnMut(*mut libe2fs_sys::ext2_dir_entry, i32, i32, &str, &[i8]) -> Result<i32>,
+    F: FnMut(
+        *mut libe2fs_sys::ext2_dir_entry,
+        i32,
+        i32,
+        &str,
+        &[::std::ffi::c_char],
+    ) -> Result<i32>,
 {
     dir_iterator_trampoline::<F>
 }
