@@ -545,7 +545,7 @@ impl<'a> FloppyDirEntry<'a, ExtFacadeFloppyDisk> for ExtFacadeDirEntry {
         // SAFETY: We just got this struct (and therefore pointer) from e2fs.
         unsafe {
             OsString::from_vec(
-                CString::from_raw(self.entry.name.as_ptr() as *mut i8)
+                CString::from_raw(self.entry.name.as_ptr() as *mut ::std::ffi::c_char)
                     .as_bytes()
                     .to_vec(),
             )
